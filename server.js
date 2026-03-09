@@ -3,65 +3,49 @@ const WebSocket = require('ws');
 const PORT = 8080;
 const HEARTBEAT_INTERVAL = 30000; // 30 seconds
 
-// Client state: { ws, world, x, y, plane, username, lastSeen }
+// Client state: { ws, world, x, y, plane, username, lastSeen, isAlive }
 const clients = new Map();
 
-// Helper: Chebyshev distance between two points
+// Chebyshev distance (matches OSRS tile distance)
 function chebyshevDistance(x1, y1, x2, y2) {
 	return Math.max(Math.abs(x1 - x2), Math.abs(y1 - y2));
 }
 
-// Helper: Calculate distance between two 3D points (including plane)
 function distance3D(x1, y1, z1, x2, y2, z2) {
-	if (z1 !== z2) {
-		return Infinity; // Different planes are infinitely far
-	}
+	if (z1 !== z2) return Infinity;
 	return chebyshevDistance(x1, y1, x2, y2);
 }
 
-// Create WebSocket server
 const wss = new WebSocket.Server({ port: PORT });
 
 console.log(`TileWhisper relay server listening on port ${PORT}`);
 
-// Send welcome message to new client
 function sendWelcome(ws) {
 	ws.send(JSON.stringify({ type: 'welcome' }));
 }
 
-// Send nearby players list to a client
+// Send the nearby players list to a single client
 function sendNearbyPlayers(clientId) {
 	const client = clients.get(clientId);
 	if (!client) return;
 
 	const nearby = [];
-	const maxDistance = 50; // Server filters wider than client to prevent edge cutoff
+	const maxDistance = 50;
 
 	for (const [id, other] of clients.entries()) {
-		if (id === clientId) continue; // Skip self
-
-		// Check if same world and within range
+		if (id === clientId) continue;
 		if (other.world === client.world) {
 			const dist = distance3D(client.x, client.y, client.plane, other.x, other.y, other.plane);
 			if (dist <= maxDistance) {
-				nearby.push({
-					username: other.username,
-					world: other.world,
-					x: other.x,
-					y: other.y,
-					plane: other.plane
-				});
+				nearby.push({ username: other.username, world: other.world, x: other.x, y: other.y, plane: other.plane });
 			}
 		}
 	}
 
-	client.ws.send(JSON.stringify({
-		type: 'nearby',
-		players: nearby
-	}));
+	client.ws.send(JSON.stringify({ type: 'nearby', players: nearby }));
 }
 
-// Forward audio packet to nearby clients
+// Forward an audio packet to all nearby clients (excluding sender)
 function forwardAudioToNearby(senderId, audioData, x, y, plane) {
 	const sender = clients.get(senderId);
 	if (!sender) return;
@@ -70,77 +54,44 @@ function forwardAudioToNearby(senderId, audioData, x, y, plane) {
 
 	for (const [id, client] of clients.entries()) {
 		if (id === senderId) continue;
-
 		if (client.world === sender.world) {
 			const dist = distance3D(x, y, plane, client.x, client.y, client.plane);
 			if (dist <= maxDistance) {
-				// Forward raw audio bytes
 				client.ws.send(audioData, { binary: true });
 			}
 		}
 	}
 }
 
-// Parse binary audio packet (same format as VoicePacket.java)
+// Parse binary audio packet header (same format as VoicePacket.java)
 function parseAudioPacket(buffer) {
 	if (buffer.length < 14) return null;
 
-	const view = new DataView(buffer);
-	let offset = 0;
-
-	const world = view.getUint32(offset, true); // little-endian
-	offset += 4;
-
-	const x = view.getUint32(offset, true);
-	offset += 4;
-
-	const y = view.getUint32(offset, true);
-	offset += 4;
-
-	const plane = view.getUint8(offset);
-	offset += 1;
-
-	const usernameLen = view.getUint8(offset);
-	offset += 1;
+	const world = buffer.readUInt32LE(0);
+	const x = buffer.readUInt32LE(4);
+	const y = buffer.readUInt32LE(8);
+	const plane = buffer.readUInt8(12);
+	const usernameLen = buffer.readUInt8(13);
 
 	if (buffer.length < 14 + usernameLen) return null;
 
-	const usernameBytes = new Uint8Array(buffer, offset, usernameLen);
-	const username = new TextDecoder().decode(usernameBytes);
-	offset += usernameLen;
-
-	const audioData = buffer.slice(offset);
-
-	return { world, x, y, plane, username, audioData };
+	const username = buffer.toString('utf8', 14, 14 + usernameLen);
+	return { world, x, y, plane, username };
 }
 
 wss.on('connection', (ws, req) => {
 	const clientId = req.headers['sec-websocket-key'] || Date.now() + Math.random();
 	console.log(`Client connected: ${clientId}`);
 
-	// Initialize client state
-	clients.set(clientId, {
-		ws,
-		world: 0,
-		x: 0,
-		y: 0,
-		plane: 0,
-		username: '',
-		lastSeen: Date.now(),
-		isAlive: true
-	});
+	clients.set(clientId, { ws, world: 0, x: 0, y: 0, plane: 0, username: '', lastSeen: Date.now(), isAlive: true });
 
 	sendWelcome(ws);
 
-	// Handle pong response
 	ws.on('pong', () => {
 		const client = clients.get(clientId);
-		if (client) {
-			client.isAlive = true;
-		}
+		if (client) client.isAlive = true;
 	});
 
-	// Handle incoming messages
 	ws.on('message', (data, isBinary) => {
 		const client = clients.get(clientId);
 		if (!client) return;
@@ -148,28 +99,27 @@ wss.on('connection', (ws, req) => {
 		client.lastSeen = Date.now();
 
 		if (isBinary) {
-			// Binary audio packet
 			try {
 				const packet = parseAudioPacket(data);
 				if (packet) {
+					console.log(`Audio from ${packet.username} (${data.byteLength} bytes)`);
 					forwardAudioToNearby(clientId, data, packet.x, packet.y, packet.plane);
+				} else {
+					console.warn(`Malformed audio packet from ${clientId} (${data.byteLength} bytes)`);
 				}
 			} catch (err) {
 				console.error(`Error parsing audio packet from ${clientId}:`, err);
 			}
 		} else {
-			// JSON text message
 			try {
 				const message = JSON.parse(data);
 				if (message.type === 'presence') {
-					// Update client state
 					client.world = message.world;
 					client.x = message.x;
 					client.y = message.y;
 					client.plane = message.plane;
 					client.username = message.username;
 
-					// Broadcast updated nearby players to all clients in same world
 					for (const [id, otherClient] of clients.entries()) {
 						if (otherClient.world === client.world) {
 							sendNearbyPlayers(id);
@@ -182,13 +132,10 @@ wss.on('connection', (ws, req) => {
 		}
 	});
 
-	ws.on('close', (code, reason) => {
+	ws.on('close', (code) => {
 		console.log(`Client disconnected: ${clientId} (${code})`);
-
-		// Remove client
+		const client = clients.get(clientId);
 		clients.delete(clientId);
-
-		// Update nearby players for remaining clients
 		const clientWorld = client?.world || 0;
 		for (const [id, otherClient] of clients.entries()) {
 			if (otherClient.world === clientWorld) {
@@ -202,23 +149,16 @@ wss.on('connection', (ws, req) => {
 	});
 });
 
-// Heartbeat: check for dead clients and ping alive ones
+// Heartbeat: ping all clients, terminate ones that don't respond
 setInterval(() => {
-	const now = Date.now();
-
 	for (const [id, client] of clients.entries()) {
-		// Terminate clients that haven't responded to ping
 		if (!client.isAlive) {
 			console.log(`Client ${id} terminated (no pong)`);
 			client.ws.terminate();
 			clients.delete(id);
 			continue;
 		}
-
-		// Mark as dead until pong received
 		client.isAlive = false;
-
-		// Send ping
 		if (client.ws.readyState === WebSocket.OPEN) {
 			client.ws.ping();
 		}
@@ -228,9 +168,7 @@ setInterval(() => {
 // Graceful shutdown
 process.on('SIGINT', () => {
 	console.log('Shutting down...');
-	wss.clients.forEach(ws => {
-		ws.close();
-	});
+	wss.clients.forEach(ws => ws.close());
 	wss.close(() => {
 		console.log('Server closed');
 		process.exit(0);

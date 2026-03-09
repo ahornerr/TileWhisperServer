@@ -1,0 +1,6 @@
+services:
+  tilewhisper:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "2376:8080"
