@@ -13,6 +13,29 @@ function distance3D(x1, y1, z1, x2, y2, z2) {
 	return chebyshevDistance(x1, y1, x2, y2);
 }
 
+// Validate OSRS username format (1-12 chars, alphanumeric, starts with letter)
+function isValidUsername(username) {
+	if (typeof username !== 'string') return false;
+	if (username.length < 1 || username.length > 12) return false;
+	if (!/^[A-Za-z]/.test(username)) return false; // Must start with letter
+	return /^[A-Za-z0-9_]+$/.test(username);
+}
+
+// Validate OSRS coordinate range (0-16383)
+function isValidCoordinate(coord) {
+	return Number.isInteger(coord) && coord >= 0 && coord <= 16383;
+}
+
+// Validate OSRS plane (0-3)
+function isValidPlane(plane) {
+	return Number.isInteger(plane) && plane >= 0 && plane <= 3;
+}
+
+// Validate OSRS world ID (positive integer, reasonable range)
+function isValidWorld(world) {
+	return Number.isInteger(world) && world >= 1 && world <= 10000;
+}
+
 // Parse binary audio packet header (same format as VoicePacket.java)
 // Layout: [world:4 LE][x:4 LE][y:4 LE][plane:1][usernameLen:1][username:N][audio:M]
 function parseAudioPacket(buffer) {
@@ -38,16 +61,28 @@ function createServer({
 	port = 8080,
 	maxConnectionsPerIp = 3,
 	maxTotalConnections = 500,
+	maxConnectionsPerUsername = 2,
 	maxAudioFramesPerSec = 60,
 	maxBinaryPayloadBytes = 1400,
 	maxPresencePerSec = 1,
 	maxJsonPayloadBytes = 512,
 	nearbyMaxDistance = 50,
+	// Burst detection: 30-second window limits
+	maxAudioFramesPer30Sec = 1200,  // ~40/sec sustained average
+	maxPresencePer30Sec = 30,
 } = {}) {
 	// Client state: { ws, ip, world, x, y, plane, username, lastSeen, isAlive,
 	//                  audioFrameCount, audioWindowStart,
-	//                  presenceCount, presenceWindowStart }
+	//                  audioFrameCount30s, audioWindow30Start,
+	//                  presenceCount, presenceWindowStart,
+	//                  presenceCount30s, presenceWindow30Start }
 	const clients = new Map();
+
+	// Per-world client sets for O(1) world lookups
+	const worldClients = new Map();
+
+	// Per-username connection tracking
+	const usernameToClientIds = new Map();
 
 	const wss = new WebSocket.Server({ port });
 
@@ -60,14 +95,17 @@ function createServer({
 		if (!client) return;
 
 		const nearby = [];
+		const worldSet = worldClients.get(client.world);
+		if (!worldSet) return;
 
-		for (const [id, other] of clients.entries()) {
+		for (const id of worldSet) {
 			if (id === clientId) continue;
-			if (other.world === client.world) {
-				const dist = distance3D(client.x, client.y, client.plane, other.x, other.y, other.plane);
-				if (dist <= nearbyMaxDistance) {
-					nearby.push({ username: other.username, world: other.world, x: other.x, y: other.y, plane: other.plane });
-				}
+			const other = clients.get(id);
+			if (!other) continue;
+
+			const dist = distance3D(client.x, client.y, client.plane, other.x, other.y, other.plane);
+			if (dist <= nearbyMaxDistance) {
+				nearby.push({ username: other.username, world: other.world, x: other.x, y: other.y, plane: other.plane });
 			}
 		}
 
@@ -78,13 +116,17 @@ function createServer({
 		const sender = clients.get(senderId);
 		if (!sender) return;
 
-		for (const [id, client] of clients.entries()) {
+		const worldSet = worldClients.get(sender.world);
+		if (!worldSet) return;
+
+		for (const id of worldSet) {
 			if (id === senderId) continue;
-			if (client.world === sender.world) {
-				const dist = distance3D(x, y, plane, client.x, client.y, client.plane);
-				if (dist <= nearbyMaxDistance) {
-					client.ws.send(audioData, { binary: true });
-				}
+			const client = clients.get(id);
+			if (!client) continue;
+
+			const dist = distance3D(x, y, plane, client.x, client.y, client.plane);
+			if (dist <= nearbyMaxDistance) {
+				client.ws.send(audioData, { binary: true });
 			}
 		}
 	}
@@ -100,11 +142,11 @@ function createServer({
 		}
 
 		// Enforce per-IP connection limit
-		const existingConnections = Array.from(clients.values())
+		const ipConnections = Array.from(clients.values())
 			.filter(c => c.ip === clientIp).length;
 
-		if (existingConnections >= maxConnectionsPerIp) {
-			console.warn(`Connection rejected from ${clientIp}: too many connections (${existingConnections}/${maxConnectionsPerIp})`);
+		if (ipConnections >= maxConnectionsPerIp) {
+			console.warn(`Connection rejected from ${clientIp}: too many connections (${ipConnections}/${maxConnectionsPerIp})`);
 			ws.close(1008, 'Too many connections from your IP');
 			return;
 		}
@@ -112,17 +154,22 @@ function createServer({
 		const clientId = req.headers['sec-websocket-key'] || `${Date.now()}-${Math.random()}`;
 		console.log(`Client connected: ${clientId} (${clientIp})`);
 
+		const now = Date.now();
 		clients.set(clientId, {
 			ws,
 			ip: clientIp,
 			world: 0, x: 0, y: 0, plane: 0,
 			username: '',
-			lastSeen: Date.now(),
+			lastSeen: now,
 			isAlive: true,
 			audioFrameCount: 0,
-			audioWindowStart: Date.now(),
+			audioWindowStart: now,
+			audioFrameCount30s: 0,
+			audioWindow30Start: now,
 			presenceCount: 0,
-			presenceWindowStart: Date.now(),
+			presenceWindowStart: now,
+			presenceCount30s: 0,
+			presenceWindow30Start: now,
 		});
 
 		sendWelcome(ws);
@@ -156,9 +203,29 @@ function createServer({
 					return; // Drop silently
 				}
 
+				// Burst detection: 30-second window
+				if (now - client.audioWindow30Start >= 30000) {
+					client.audioWindow30Start = now;
+					client.audioFrameCount30s = 0;
+				}
+				client.audioFrameCount30s++;
+				if (client.audioFrameCount30s > maxAudioFramesPer30Sec) {
+					console.warn(`Burst audio detected from ${clientId}, dropping`);
+					return;
+				}
+
 				try {
 					const packet = parseAudioPacket(data);
 					if (packet) {
+						// Protocol validation for audio packets
+						if (!isValidWorld(packet.world) ||
+						    !isValidCoordinate(packet.x) ||
+						    !isValidCoordinate(packet.y) ||
+						    !isValidPlane(packet.plane) ||
+						    !isValidUsername(packet.username)) {
+							console.warn(`Invalid audio packet from ${clientId}: world=${packet.world}, x=${packet.x}, y=${packet.y}, plane=${packet.plane}, username=${packet.username}`);
+							return;
+						}
 						forwardAudioToNearby(clientId, data, packet.x, packet.y, packet.plane);
 					} else {
 						console.warn(`Malformed audio packet from ${clientId} (${data.byteLength} bytes)`);
@@ -176,6 +243,39 @@ function createServer({
 				try {
 					const message = JSON.parse(data);
 					if (message.type === 'presence') {
+						// Protocol validation for presence
+						if (!isValidWorld(message.world) ||
+						    !isValidCoordinate(message.x) ||
+						    !isValidCoordinate(message.y) ||
+						    !isValidPlane(message.plane) ||
+						    !isValidUsername(message.username)) {
+							console.warn(`Invalid presence from ${clientId}: world=${message.world}, x=${message.x}, y=${message.y}, plane=${message.plane}, username=${message.username}`);
+							return;
+						}
+
+						// Enforce per-username connection limit
+						const username = message.username;
+						const existingUsernameIds = usernameToClientIds.get(username) || new Set();
+						if (!existingUsernameIds.has(clientId)) {
+							if (existingUsernameIds.size >= maxConnectionsPerUsername) {
+								console.warn(`Too many connections for username ${username} (${existingUsernameIds.size}/${maxConnectionsPerUsername}), rejecting presence from ${clientId}`);
+								return;
+							}
+							existingUsernameIds.add(clientId);
+							usernameToClientIds.set(username, existingUsernameIds);
+
+							// Clean up old username entry if it exists
+							if (client.username && client.username !== username) {
+								const oldUsernameIds = usernameToClientIds.get(client.username);
+								if (oldUsernameIds) {
+									oldUsernameIds.delete(clientId);
+									if (oldUsernameIds.size === 0) {
+										usernameToClientIds.delete(client.username);
+									}
+								}
+							}
+						}
+
 						// Rate limit presence messages
 						const now = Date.now();
 						if (now - client.presenceWindowStart >= 1000) {
@@ -187,14 +287,63 @@ function createServer({
 							return; // Drop silently
 						}
 
+						// Burst detection: 30-second window
+						if (now - client.presenceWindow30Start >= 30000) {
+							client.presenceWindow30Start = now;
+							client.presenceCount30s = 0;
+						}
+						client.presenceCount30s++;
+						if (client.presenceCount30s > maxPresencePer30Sec) {
+							console.warn(`Burst presence detected from ${clientId}, dropping`);
+							return;
+						}
+
+						// Update client's username and remove from old username tracking if changed
+						if (client.username && client.username !== username) {
+							const oldUsernameIds = usernameToClientIds.get(client.username);
+							if (oldUsernameIds) {
+								oldUsernameIds.delete(clientId);
+								if (oldUsernameIds.size === 0) {
+									usernameToClientIds.delete(client.username);
+								}
+							}
+						}
+						client.username = username;
+
+						// Update world and coordinates
+						const oldWorld = client.world;
 						client.world = message.world;
 						client.x = message.x;
 						client.y = message.y;
 						client.plane = message.plane;
-						client.username = message.username;
 
-						for (const [id, otherClient] of clients.entries()) {
-							if (otherClient.world === client.world) {
+						// Update world index
+						if (oldWorld !== client.world) {
+							// Remove from old world
+							const oldWorldSet = worldClients.get(oldWorld);
+							if (oldWorldSet) {
+								oldWorldSet.delete(clientId);
+								if (oldWorldSet.size === 0) {
+									worldClients.delete(oldWorld);
+								}
+							}
+							// Add to new world
+							if (!worldClients.has(client.world)) {
+								worldClients.set(client.world, new Set());
+							}
+							worldClients.get(client.world).add(clientId);
+						} else {
+							// Ensure client is in world set (first presence)
+							if (!worldClients.has(client.world)) {
+								worldClients.set(client.world, new Set());
+							}
+							worldClients.get(client.world).add(clientId);
+						}
+
+						// Broadcast to all same-world clients
+						const worldSet = worldClients.get(client.world);
+						if (worldSet) {
+							for (const id of worldSet) {
 								sendNearbyPlayers(id);
 							}
 						}
@@ -208,10 +357,35 @@ function createServer({
 		ws.on('close', (code) => {
 			const client = clients.get(clientId);
 			const clientWorld = client?.world || 0;
+			const clientUsername = client?.username || '';
 			console.log(`Client disconnected: ${clientId} ip=${client?.ip} (${code})`);
+
+			// Remove from world index
+			const worldSet = worldClients.get(clientWorld);
+			if (worldSet) {
+				worldSet.delete(clientId);
+				if (worldSet.size === 0) {
+					worldClients.delete(clientWorld);
+				}
+			}
+
+			// Remove from username tracking
+			if (clientUsername) {
+				const usernameIds = usernameToClientIds.get(clientUsername);
+				if (usernameIds) {
+					usernameIds.delete(clientId);
+					if (usernameIds.size === 0) {
+						usernameToClientIds.delete(clientUsername);
+					}
+				}
+			}
+
 			clients.delete(clientId);
-			for (const [id, otherClient] of clients.entries()) {
-				if (otherClient.world === clientWorld) {
+
+			// Notify same-world clients
+			const notifySet = worldClients.get(clientWorld);
+			if (notifySet) {
+				for (const id of notifySet) {
 					sendNearbyPlayers(id);
 				}
 			}
@@ -227,6 +401,27 @@ function createServer({
 		for (const [id, client] of clients.entries()) {
 			if (!client.isAlive) {
 				console.log(`Client ${id} terminated (no pong)`);
+
+				// Remove from world index
+				const worldSet = worldClients.get(client.world);
+				if (worldSet) {
+					worldSet.delete(id);
+					if (worldSet.size === 0) {
+						worldClients.delete(client.world);
+					}
+				}
+
+				// Remove from username tracking
+				if (client.username) {
+					const usernameIds = usernameToClientIds.get(client.username);
+					if (usernameIds) {
+						usernameIds.delete(id);
+						if (usernameIds.size === 0) {
+							usernameToClientIds.delete(client.username);
+						}
+					}
+				}
+
 				client.ws.terminate();
 				clients.delete(id);
 				continue;
@@ -258,4 +453,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { createServer, parseAudioPacket, chebyshevDistance, distance3D };
+module.exports = { createServer, parseAudioPacket, chebyshevDistance, distance3D, isValidUsername, isValidCoordinate, isValidPlane, isValidWorld };
