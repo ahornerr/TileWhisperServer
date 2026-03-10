@@ -333,6 +333,25 @@ describe('Server: audio forwarding', () => {
 });
 
 describe('Server: rate limiting', () => {
+	it('rejects connections beyond maxTotalConnections', async () => {
+		const { wss, port } = startServer({ maxTotalConnections: 2 });
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+
+		// Third connection (beyond global cap) should be rejected
+		const c = new WebSocket(`ws://localhost:${port}`);
+		const closeCode = await new Promise((resolve) => {
+			c.on('close', (code) => resolve(code));
+			c.on('error', () => resolve(-1)); // connection error also counts as rejected
+		});
+		expect(c.readyState).not.toBe(WebSocket.OPEN);
+
+		await closeAllAndWait([a, b, c]);
+		wss.close();
+	});
+
 	it('rejects connections beyond maxConnectionsPerIp', async () => {
 		const { wss, port } = startServer({ maxConnectionsPerIp: 2 });
 
@@ -426,6 +445,50 @@ describe('Server: rate limiting', () => {
 
 		expect(binaryReceived).toBeLessThanOrEqual(4); // at most 3 + tiny timing margin
 		expect(binaryReceived).toBeGreaterThan(0);    // at least some passed
+
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('drops excess presence messages within the same second', async () => {
+		const { wss, port } = startServer({ maxPresencePerSec: 1 });
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+
+		// Put b in world 800 first so it will receive broadcasts from a
+		sendPresence(b, { username: 'Bob', world: 800, x: 3200, y: 3200 });
+		await nextMessage(b); // b's own nearby update (no one else yet)
+
+		// First presence from a: allowed — a and b both receive nearby updates
+		sendPresence(a, { username: 'Alice', world: 800, x: 3200, y: 3200 });
+		await nextMessage(a); // drain a's nearby
+		const firstUpdate = JSON.parse(await nextMessage(b));
+		expect(firstUpdate.type).toBe('nearby');
+
+		// Second presence in the same second: should be dropped — b gets no further nearby update
+		sendPresence(a, { username: 'Alice', world: 800, x: 3201, y: 3201 });
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects oversized JSON payloads', async () => {
+		const { wss, port } = startServer({ maxJsonPayloadBytes: 100 });
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+
+		// Send a presence-like JSON message larger than 100 bytes
+		const oversized = JSON.stringify({ type: 'presence', world: 301, x: 3200, y: 3200, plane: 0, username: 'A'.repeat(100) });
+		expect(oversized.length).toBeGreaterThan(100);
+		a.send(oversized);
+
+		// b should not receive any nearby update triggered by the dropped message
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
 
 		await closeAllAndWait([a, b]);
 		wss.close();
