@@ -86,6 +86,9 @@ function createServer({
 
 	const wss = new WebSocket.Server({ port });
 
+	// Atomic counter for client IDs (more reliable than Sec-WebSocket-Key)
+	let clientIdCounter = 0;
+
 	function sendWelcome(ws) {
 		ws.send(JSON.stringify({ type: 'welcome' }));
 	}
@@ -151,7 +154,7 @@ function createServer({
 			return;
 		}
 
-		const clientId = req.headers['sec-websocket-key'] || `${Date.now()}-${Math.random()}`;
+		const clientId = String(++clientIdCounter);
 		console.log(`Client connected: ${clientId} (${clientIp})`);
 
 		const now = Date.now();
@@ -298,16 +301,6 @@ function createServer({
 							return;
 						}
 
-						// Update client's username and remove from old username tracking if changed
-						if (client.username && client.username !== username) {
-							const oldUsernameIds = usernameToClientIds.get(client.username);
-							if (oldUsernameIds) {
-								oldUsernameIds.delete(clientId);
-								if (oldUsernameIds.size === 0) {
-									usernameToClientIds.delete(client.username);
-								}
-							}
-						}
 						client.username = username;
 
 						// Update world and coordinates
@@ -398,6 +391,8 @@ function createServer({
 
 	// Heartbeat: ping all clients, terminate ones that don't respond
 	const heartbeat = setInterval(() => {
+		const terminatedWorlds = new Set();
+
 		for (const [id, client] of clients.entries()) {
 			if (!client.isAlive) {
 				console.log(`Client ${id} terminated (no pong)`);
@@ -422,6 +417,7 @@ function createServer({
 					}
 				}
 
+				terminatedWorlds.add(client.world);
 				client.ws.terminate();
 				clients.delete(id);
 				continue;
@@ -429,6 +425,16 @@ function createServer({
 			client.isAlive = false;
 			if (client.ws.readyState === WebSocket.OPEN) {
 				client.ws.ping();
+			}
+		}
+
+		// Notify remaining clients in worlds that lost a peer
+		for (const world of terminatedWorlds) {
+			const worldSet = worldClients.get(world);
+			if (worldSet) {
+				for (const id of worldSet) {
+					sendNearbyPlayers(id);
+				}
 			}
 		}
 	}, 30000);
