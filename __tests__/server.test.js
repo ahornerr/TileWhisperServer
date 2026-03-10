@@ -16,18 +16,32 @@ function startServer(opts = {}) {
 function connect(port) {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`ws://localhost:${port}`);
+		ws._msgQueue = [];
+		ws._msgWaiters = [];
+		ws.on('message', (data) => {
+			if (ws._msgWaiters.length > 0) {
+				ws._msgWaiters.shift()(data);
+			} else {
+				ws._msgQueue.push(data);
+			}
+		});
 		ws.on('open', () => resolve(ws));
 		ws.on('error', err => reject(err));
 	});
 }
 
 function nextMessage(ws, timeout = 1000) {
+	if (ws._msgQueue.length > 0) return Promise.resolve(ws._msgQueue.shift());
 	return new Promise((resolve, reject) => {
 		let done = false;
-		const finish = (fn) => { if (!done) { done = true; fn(); } };
-		const timer = setTimeout(() => finish(() => reject(new Error(`Timeout waiting ${timeout}ms`))), timeout);
-		ws.once('message', (data) => finish(() => { clearTimeout(timer); resolve(data); }));
-		ws.once('error', () => finish(() => { clearTimeout(timer); reject(new Error('WebSocket error')); }));
+		const timer = setTimeout(() => {
+			if (done) return; done = true;
+			const i = ws._msgWaiters.indexOf(waiter);
+			if (i >= 0) ws._msgWaiters.splice(i, 1);
+			reject(new Error(`Timeout waiting ${timeout}ms`));
+		}, timeout);
+		const waiter = (data) => { if (done) return; done = true; clearTimeout(timer); resolve(data); };
+		ws._msgWaiters.push(waiter);
 	});
 }
 
@@ -189,9 +203,10 @@ describe('Server: presence and nearby', () => {
 		await nextMessage(b); // welcome
 
 		sendPresence(a, { username: 'Alice', world: 400, x: 3200, y: 3200 });
+		await nextMessage(a); // drain Alice's nearby before Bob joins
 		sendPresence(b, { username: 'Bob', world: 400, x: 3205, y: 3205 });
 
-		// Collect nearby messages
+		// Collect nearby messages sent when both players are in the world
 		const msgs = await Promise.all([nextMessage(a), nextMessage(b)]);
 		const playerNames = msgs.flatMap(d => JSON.parse(d).players.map(p => p.username));
 		expect(playerNames).toContain('Alice');
