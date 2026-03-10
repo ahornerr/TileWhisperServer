@@ -37,12 +37,16 @@ function parseAudioPacket(buffer) {
 function createServer({
 	port = 8080,
 	maxConnectionsPerIp = 3,
+	maxTotalConnections = 500,
 	maxAudioFramesPerSec = 60,
 	maxBinaryPayloadBytes = 1400,
+	maxPresencePerSec = 1,
+	maxJsonPayloadBytes = 512,
 	nearbyMaxDistance = 50,
 } = {}) {
 	// Client state: { ws, ip, world, x, y, plane, username, lastSeen, isAlive,
-	//                  audioFrameCount, audioWindowStart }
+	//                  audioFrameCount, audioWindowStart,
+	//                  presenceCount, presenceWindowStart }
 	const clients = new Map();
 
 	const wss = new WebSocket.Server({ port });
@@ -88,6 +92,13 @@ function createServer({
 	wss.on('connection', (ws, req) => {
 		const clientIp = req.socket.remoteAddress;
 
+		// Enforce global connection cap
+		if (clients.size >= maxTotalConnections) {
+			console.warn(`Connection rejected from ${clientIp}: server full (${clients.size}/${maxTotalConnections})`);
+			ws.close(1008, 'Server full, try again later');
+			return;
+		}
+
 		// Enforce per-IP connection limit
 		const existingConnections = Array.from(clients.values())
 			.filter(c => c.ip === clientIp).length;
@@ -110,6 +121,8 @@ function createServer({
 			isAlive: true,
 			audioFrameCount: 0,
 			audioWindowStart: Date.now(),
+			presenceCount: 0,
+			presenceWindowStart: Date.now(),
 		});
 
 		sendWelcome(ws);
@@ -154,9 +167,26 @@ function createServer({
 					console.error(`Error parsing audio packet from ${clientId}:`, err);
 				}
 			} else {
+				// Reject oversized JSON payloads
+				if (data.length > maxJsonPayloadBytes) {
+					console.warn(`Oversized JSON from ${clientId} (${data.length} bytes), dropping`);
+					return;
+				}
+
 				try {
 					const message = JSON.parse(data);
 					if (message.type === 'presence') {
+						// Rate limit presence messages
+						const now = Date.now();
+						if (now - client.presenceWindowStart >= 1000) {
+							client.presenceWindowStart = now;
+							client.presenceCount = 0;
+						}
+						client.presenceCount++;
+						if (client.presenceCount > maxPresencePerSec) {
+							return; // Drop silently
+						}
+
 						client.world = message.world;
 						client.x = message.x;
 						client.y = message.y;
