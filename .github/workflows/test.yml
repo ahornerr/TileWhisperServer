@@ -1,0 +1,16 @@
+name: Tests
+
+on:
+  push:
+    branches: [ 'master', 'abuse-prevention' ]
+  pull_request:
+    branches: [ 'master' ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Jest tests
+        run: |
+          npm ci
+          npm test
