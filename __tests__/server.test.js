@@ -493,4 +493,230 @@ describe('Server: rate limiting', () => {
 		await closeAllAndWait([a, b]);
 		wss.close();
 	});
+
+	it('rejects presence with invalid username (starts with number)', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(b, { username: 'Bob', world: 900, x: 3200, y: 3200 });
+		await nextMessage(b); // b's own nearby
+
+		// Send presence with username starting with number
+		a.send(JSON.stringify({ type: 'presence', world: 900, x: 3200, y: 3200, username: '1Player' }));
+
+		// b should not receive nearby for invalid username
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects presence with invalid username (too long)', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(b, { username: 'Bob', world: 901, x: 3200, y: 3200 });
+		await nextMessage(b);
+
+		// Send presence with 13-character username
+		a.send(JSON.stringify({ type: 'presence', world: 901, x: 3200, y: 3200, username: 'TooLongNameX' }));
+
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects presence with invalid coordinate (negative)', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(b, { username: 'Bob', world: 902, x: 3200, y: 3200 });
+		await nextMessage(b);
+
+		a.send(JSON.stringify({ type: 'presence', world: 902, x: -1, y: 3200, username: 'Alice' }));
+
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects presence with invalid coordinate (exceeds max)', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(b, { username: 'Bob', world: 903, x: 3200, y: 3200 });
+		await nextMessage(b);
+
+		a.send(JSON.stringify({ type: 'presence', world: 903, x: 16384, y: 3200, username: 'Alice' }));
+
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects presence with invalid plane', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(b, { username: 'Bob', world: 904, x: 3200, y: 3200 });
+		await nextMessage(b);
+
+		a.send(JSON.stringify({ type: 'presence', world: 904, x: 3200, y: 3200, plane: 4, username: 'Alice' }));
+
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects presence with invalid world', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(b, { username: 'Bob', world: 905, x: 3200, y: 3200 });
+		await nextMessage(b);
+
+		a.send(JSON.stringify({ type: 'presence', world: 0, x: 3200, y: 3200, username: 'Alice' }));
+
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects presence from third connection with same username', async () => {
+		// Allow 2 connections per username so a and b both get in, but c is rejected
+		const { wss, port } = startServer({ maxConnectionsPerUsername: 2 });
+
+		const [a, b, c] = await Promise.all([connect(port), connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		await nextMessage(c); // welcome
+
+		sendPresence(a, { username: 'SameUser', world: 1000, x: 3200, y: 3200 });
+		await nextMessage(a); // a gets nearby
+
+		sendPresence(b, { username: 'SameUser', world: 1000, x: 3200, y: 3200 });
+		await nextMessage(b); // b gets nearby
+		await nextMessage(a); // a sees b arrive
+
+		// Third connection with same username: presence rejected, no one gets update
+		sendPresence(c, { username: 'SameUser', world: 1000, x: 3200, y: 3201 });
+
+		await expect(nextMessage(a, 300)).rejects.toThrow('Timeout');
+		await expect(nextMessage(b, 300)).rejects.toThrow('Timeout');
+		await expect(nextMessage(c, 300)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b, c]);
+		wss.close();
+	});
+
+	it('rejects audio packet with invalid username', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(a, { username: 'Alice', world: 1100, x: 3200, y: 3200 });
+		await nextMessage(a);
+		sendPresence(b, { username: 'Bob', world: 1100, x: 3200, y: 3200 });
+		await nextMessage(b);
+		await nextMessage(a); // a gets nearby when b joins
+
+		// Send audio with invalid username
+		const audio = buildAudioBuffer({ world: 1100, x: 3200, y: 3200, username: '123Invalid' });
+		a.send(audio);
+
+		await expect(nextMessage(b, 400)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('rejects audio packet with invalid coordinates', async () => {
+		const { wss, port } = startServer();
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+		sendPresence(a, { username: 'Alice', world: 1200, x: 3200, y: 3200 });
+		await nextMessage(a);
+		sendPresence(b, { username: 'Bob', world: 1200, x: 3200, y: 3200 });
+		await nextMessage(b);
+		await nextMessage(a); // a gets nearby when b joins
+
+		// Send audio with invalid coordinates
+		const audio = buildAudioBuffer({ world: 1200, x: -5, y: 3200, username: 'Alice' });
+		a.send(audio);
+
+		await expect(nextMessage(b, 400)).rejects.toThrow('Timeout');
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('detects and drops burst audio (30s window)', async () => {
+		const { wss, port } = startServer({ maxAudioFramesPer30Sec: 5, maxAudioFramesPerSec: 1000 });
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+
+		sendPresence(a, { username: 'Alice', world: 1300, x: 3200, y: 3200 });
+		await nextMessage(a);
+		sendPresence(b, { username: 'Bob', world: 1300, x: 3200, y: 3200 });
+		await nextMessage(b);
+		await nextMessage(a);
+
+		const audio = buildAudioBuffer({ world: 1300, x: 3200, y: 3200, username: 'Alice' });
+
+		let binaryReceived = 0;
+		b.on('message', (msg, isBinary) => { if (isBinary) binaryReceived++; });
+
+		// Send 10 frames synchronously — first 5 should pass, next 5 dropped due to burst limit
+		for (let i = 0; i < 10; i++) a.send(audio);
+
+		await new Promise(r => setTimeout(r, 300));
+
+		expect(binaryReceived).toBeLessThanOrEqual(7); // at most 5 + tiny timing margin
+		expect(binaryReceived).toBeGreaterThan(0); // at least some passed
+
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+
+	it('detects and drops burst presence (30s window)', async () => {
+		const { wss, port } = startServer({ maxPresencePer30Sec: 2, maxPresencePerSec: 100 });
+
+		const [a, b] = await Promise.all([connect(port), connect(port)]);
+		await nextMessage(a); // welcome
+		await nextMessage(b); // welcome
+
+		sendPresence(b, { username: 'Bob', world: 1400, x: 3200, y: 3200 });
+		await nextMessage(b);
+
+		let jsonReceived = 0;
+		b.on('message', (msg, isBinary) => { if (!isBinary) jsonReceived++; });
+
+		// Send 3 presence updates quickly (under per-second limit, over 30s limit)
+		sendPresence(a, { username: 'Alice', world: 1400, x: 3200, y: 3200, plane: 0 });
+		sendPresence(a, { username: 'Alice', world: 1400, x: 3200, y: 3200, plane: 0 });
+		sendPresence(a, { username: 'Alice', world: 1400, x: 3200, y: 3200, plane: 0 });
+
+		await new Promise(r => setTimeout(r, 300));
+
+		// At most 2 should pass
+		expect(jsonReceived).toBeLessThanOrEqual(4); // 2 updates × 2 notifications each
+		expect(jsonReceived).toBeGreaterThan(0);
+
+		await closeAllAndWait([a, b]);
+		wss.close();
+	});
 });
