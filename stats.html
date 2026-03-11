@@ -161,6 +161,16 @@ footer {
   color: var(--text-dim);
   margin-top: 8px;
 }
+
+#demo-indicator {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--bg);
+  background: var(--gold);
+  padding: 3px 8px;
+  border-radius: 4px;
+}
 </style>
 </head>
 <body>
@@ -171,6 +181,7 @@ footer {
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
   </div>
+  <div id="demo-indicator" style="display:none">DEMO MODE</div>
 </header>
 
 <div class="kpi-grid">
@@ -225,11 +236,13 @@ footer {
 <footer>Fully aggregated &amp; anonymous · no usernames, IPs, or per-client data · updates every 5 s</footer>
 
 <script>
-const CHART_GOLD = 'rgba(200,169,81,0.9)';
+// Check for ?demo flag in URL
+const DEMO_MODE = new URLSearchParams(location.search).has('demo');
+if (DEMO_MODE) document.getElementById('demo-indicator').style.display = 'block';
+
+const CHART_GOLD      = 'rgba(200,169,81,0.9)';
 const CHART_GOLD_FILL = 'rgba(200,169,81,0.12)';
-const CHART_RED = 'rgba(248,81,73,0.8)';
-const CHART_RED_FILL = 'rgba(248,81,73,0.08)';
-const GRID_COLOR = 'rgba(255,255,255,0.06)';
+const GRID_COLOR      = 'rgba(255,255,255,0.06)';
 
 Chart.defaults.color = '#8b949e';
 Chart.defaults.font.family = 'system-ui,-apple-system,sans-serif';
@@ -240,8 +253,7 @@ function makeLineChart(id, label, color, fill) {
     type: 'line',
     data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: fill, borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: true }] },
     options: {
-      animation: false,
-      responsive: true, maintainAspectRatio: false,
+      animation: false, responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: {
         x: { grid: { color: GRID_COLOR }, ticks: { maxTicksLimit: 8, maxRotation: 0 } },
@@ -258,9 +270,7 @@ const chartWorlds = new Chart(document.getElementById('chart-worlds'), {
   type: 'bar',
   data: { labels: [], datasets: [{ label: 'Players', data: [], backgroundColor: CHART_GOLD_FILL, borderColor: CHART_GOLD, borderWidth: 1 }] },
   options: {
-    animation: false,
-    indexAxis: 'y',
-    responsive: true, maintainAspectRatio: false,
+    animation: false, indexAxis: 'y', responsive: true, maintainAspectRatio: false,
     plugins: { legend: { display: false } },
     scales: {
       x: { grid: { color: GRID_COLOR }, ticks: { precision: 0 } },
@@ -281,22 +291,10 @@ function fmtBytes(b) {
   return b+' B';
 }
 
-function loadHistory(data) {
-  if (!Array.isArray(data) || data.length === 0) return;
-  const labels = data.map(p => fmtTime(p.timestamp));
-  chartPlayers.data.labels = labels;
-  chartPlayers.data.datasets[0].data = data.map(p => p.totalConnections);
-  chartPlayers.update('none');
-
-  chartAudio.data.labels = labels;
-  chartAudio.data.datasets[0].data = data.map(p => p.audioFramesForwarded);
-  chartAudio.update('none');
-}
-
 function bump(id) {
   const el = document.getElementById(id);
   el.classList.remove('bump');
-  void el.offsetWidth; // reflow
+  void el.offsetWidth;
   el.classList.add('bump');
   setTimeout(() => el.classList.remove('bump'), 200);
 }
@@ -304,6 +302,16 @@ function bump(id) {
 function set(id, val) {
   const el = document.getElementById(id);
   if (el.textContent !== String(val)) { el.textContent = val; bump(id); }
+}
+
+function loadHistory(data) {
+  if (!Array.isArray(data) || data.length === 0) return;
+  chartPlayers.data.labels = data.map(p => fmtTime(p.timestamp));
+  chartPlayers.data.datasets[0].data = data.map(p => p.totalConnections);
+  chartPlayers.update('none');
+  chartAudio.data.labels = data.map(p => fmtTime(p.timestamp));
+  chartAudio.data.datasets[0].data = data.map(p => p.audioFramesForwarded);
+  chartAudio.update('none');
 }
 
 function updateKPIs(s) {
@@ -315,22 +323,122 @@ function updateKPIs(s) {
   set('kpi-bw', fmtBytes(s.bandwidthBytesOutTotal));
   set('kpi-rejected', s.connectionsRejectedTotal);
 
-  // Update worlds bar chart
   const entries = Object.entries(s.worldPlayerCounts || {})
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
+    .sort((a, b) => b[1] - a[1]).slice(0, 10);
   chartWorlds.data.labels = entries.map(e => 'W' + e[0]);
   chartWorlds.data.datasets[0].data = entries.map(e => e[1]);
   chartWorlds.update('none');
 }
 
-// Load historical data first
-fetch('/api/history')
-  .then(r => r.json())
-  .then(loadHistory)
-  .catch(() => {});
+function appendLivePoint(s) {
+  const t = fmtTime(s.timestamp);
+  for (const [chart, val] of [[chartPlayers, s.totalConnections], [chartAudio, s.audioFramesForwardedTotal]]) {
+    chart.data.labels.push(t);
+    chart.data.datasets[0].data.push(val);
+    if (chart.data.labels.length > 1440) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
+    chart.update('none');
+  }
+}
 
-// WebSocket live updates with exponential backoff
+// ── Demo mode ──────────────────────────────────────────────────────────────
+
+// Seeded-random walk so the 24h history looks continuous, not jumpy
+function generateHistory() {
+  const history = [];
+  const now = Date.now();
+  // Fixed world pool for demo — realistic OSRS world numbers
+  const WORLDS = [301, 302, 303, 308, 316, 325, 330, 358, 384, 394, 406, 416, 430, 450, 470];
+
+  let players = 28; // start value for smooth walk
+  let totalAudio = 0, totalDropped = 0, totalBw = 0, totalRejected = 0;
+
+  for (let i = 1439; i >= 0; i--) {
+    const ts = now - i * 60000;
+    const hour = new Date(ts).getHours();
+
+    // Time-of-day multiplier: peaks evenings (18–22), dips at night (0–7)
+    const tod = 0.4 + 0.6 * Math.max(0, Math.sin((hour - 4) * Math.PI / 18));
+
+    // Smooth random walk clamped to a realistic range
+    const target = Math.round(10 + 60 * tod);
+    players = Math.round(players + (target - players) * 0.08 + (Math.random() - 0.5) * 4);
+    players = Math.max(0, Math.min(120, players));
+
+    const worlds = Math.max(1, Math.round(players / 8 + Math.random() * 2));
+    const audio  = Math.round(players * (8 + Math.random() * 6));
+    const dropped = Math.round(audio * 0.015 * Math.random() * 2);
+    const bw = audio * 120;
+    const rejected = Math.random() < 0.1 ? 1 : 0;
+
+    totalAudio    += audio;
+    totalDropped  += dropped;
+    totalBw       += bw;
+    totalRejected += rejected;
+
+    history.push({
+      timestamp: ts,
+      totalConnections: players,
+      authenticatedConnections: Math.round(players * 0.88),
+      activeWorlds: worlds,
+      uniqueUsernames: Math.round(players * 0.72),
+      audioFramesForwarded: audio,
+      audioFramesDropped: dropped,
+      estimatedBandwidthBytesOut: bw,
+      connectionsRejected: rejected,
+    });
+  }
+
+  return history;
+}
+
+let demoTick = 0;
+let demoCumAudio = 0, demoCumDropped = 0, demoCumBw = 0, demoCumRejected = 0;
+let demoPlayers = 28;
+const DEMO_WORLDS = [301, 302, 303, 308, 316, 325, 330, 358, 384, 394, 406, 416, 430, 450, 470];
+
+function generateLiveTick() {
+  demoTick++;
+  const hour = new Date().getHours();
+  const tod = 0.4 + 0.6 * Math.max(0, Math.sin((hour - 4) * Math.PI / 18));
+  const target = Math.round(10 + 60 * tod);
+  demoPlayers = Math.round(demoPlayers + (target - demoPlayers) * 0.08 + (Math.random() - 0.5) * 4);
+  demoPlayers = Math.max(0, Math.min(120, demoPlayers));
+
+  const worlds = Math.max(1, Math.round(demoPlayers / 8 + Math.random() * 2));
+  const audio  = Math.round(demoPlayers * (8 + Math.random() * 6));
+  const dropped = Math.round(audio * 0.015 * Math.random() * 2);
+  const rejected = Math.random() < 0.1 ? 1 : 0;
+
+  demoCumAudio    += audio;
+  demoCumDropped  += dropped;
+  demoCumBw       += audio * 120;
+  demoCumRejected += rejected;
+
+  // Distribute players across active worlds
+  const worldPlayerCounts = {};
+  let remaining = demoPlayers;
+  for (let w = 0; w < worlds; w++) {
+    const share = w < worlds - 1 ? Math.round(remaining * (0.3 + Math.random() * 0.4)) : remaining;
+    worldPlayerCounts[DEMO_WORLDS[w]] = Math.max(1, share);
+    remaining = Math.max(0, remaining - share);
+  }
+
+  return {
+    timestamp: Date.now(),
+    totalConnections: demoPlayers,
+    authenticatedConnections: Math.round(demoPlayers * 0.88),
+    activeWorlds: worlds,
+    uniqueUsernames: Math.round(demoPlayers * 0.72),
+    worldPlayerCounts,
+    audioFramesForwardedTotal: demoCumAudio,
+    audioFramesDroppedTotal:   demoCumDropped,
+    bandwidthBytesOutTotal:    demoCumBw,
+    connectionsRejectedTotal:  demoCumRejected,
+  };
+}
+
+// ── Live WebSocket (non-demo) ──────────────────────────────────────────────
+
 let ws, retryDelay = 1000;
 
 function connect() {
@@ -347,35 +455,16 @@ function connect() {
     try {
       const s = JSON.parse(e.data);
       updateKPIs(s);
-
-      // Append to charts (live point)
-      const t = fmtTime(s.timestamp);
-      chartPlayers.data.labels.push(t);
-      chartPlayers.data.datasets[0].data.push(s.totalConnections);
-      if (chartPlayers.data.labels.length > 1440) {
-        chartPlayers.data.labels.shift();
-        chartPlayers.data.datasets[0].data.shift();
-      }
-      chartAudio.data.labels.push(t);
-      chartAudio.data.datasets[0].data.push(s.audioFramesForwardedTotal);
-      if (chartAudio.data.labels.length > 1440) {
-        chartAudio.data.labels.shift();
-        chartAudio.data.datasets[0].data.shift();
-      }
-      chartPlayers.update('none');
-      chartAudio.update('none');
-
+      appendLivePoint(s);
       const now = new Date();
       document.getElementById('status-text').textContent =
-        'Live · ' + now.getHours().toString().padStart(2,'0') + ':' +
-        now.getMinutes().toString().padStart(2,'0') + ':' +
-        now.getSeconds().toString().padStart(2,'0');
+        'Live · ' + now.toTimeString().slice(0, 8);
     } catch (_) {}
   };
 
   ws.onclose = () => {
     document.getElementById('status-dot').classList.remove('live');
-    document.getElementById('status-text').textContent = 'Reconnecting in ' + (retryDelay/1000).toFixed(0) + ' s…';
+    document.getElementById('status-text').textContent = 'Reconnecting in ' + (retryDelay/1000|0) + ' s…';
     setTimeout(connect, retryDelay);
     retryDelay = Math.min(retryDelay * 2, 30000);
   };
@@ -383,7 +472,29 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
-connect();
+// ── Boot ──────────────────────────────────────────────────────────────────
+
+if (DEMO_MODE) {
+  loadHistory(generateHistory());
+
+  // Fire one tick immediately so KPIs + world chart are populated on load
+  const initial = generateLiveTick();
+  updateKPIs(initial);
+
+  document.getElementById('status-dot').classList.add('live');
+  document.getElementById('status-text').textContent = 'Demo · simulated data';
+
+  setInterval(() => {
+    const tick = generateLiveTick();
+    updateKPIs(tick);
+    appendLivePoint(tick);
+    document.getElementById('status-text').textContent =
+      'Demo · ' + new Date().toTimeString().slice(0, 8);
+  }, 5000);
+} else {
+  fetch('/api/history').then(r => r.json()).then(loadHistory).catch(() => {});
+  connect();
+}
 </script>
 </body>
 </html>
