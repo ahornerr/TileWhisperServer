@@ -18,6 +18,14 @@ class StatsCollector {
 		this._lastAudioFramesDropped = 0;
 		this._lastBandwidthBytesOut = 0;
 		this._lastConnectionsRejected = 0;
+
+		// Session duration tracking
+		this._totalSessionDurationMs = 0;
+		this._sessionCount = 0;
+
+		// Latency tracking: rolling window of recent ping times
+		this._latencyWindow = [];
+		this._latencyWindowCapacity = 60; // Keep last 60 pings
 	}
 
 	onConnectionAccepted() {}
@@ -26,7 +34,21 @@ class StatsCollector {
 		this._connectionsRejected++;
 	}
 
-	onConnectionClosed() {}
+	onConnectionClosed(durationMs) {
+		if (Number.isFinite(durationMs) && durationMs >= 0) {
+			this._totalSessionDurationMs += durationMs;
+			this._sessionCount++;
+		}
+	}
+
+	onPingLatency(ms) {
+		if (Number.isFinite(ms) && ms >= 0) {
+			this._latencyWindow.push(ms);
+			if (this._latencyWindow.length > this._latencyWindowCapacity) {
+				this._latencyWindow.shift();
+			}
+		}
+	}
 
 	onAudioFrameForwarded(bytes) {
 		this._audioFramesForwarded++;
@@ -85,6 +107,18 @@ class StatsCollector {
 		for (const [world, set] of worldClients.entries()) {
 			worldPlayerCounts[world] = set.size;
 		}
+
+		// Calculate average latency from window
+		const avgLatencyMs = this._latencyWindow.length > 0
+			? Math.round(this._latencyWindow.reduce((a, b) => a + b, 0) / this._latencyWindow.length)
+			: 0;
+
+		// Calculate connection quality as percentage of frames delivered
+		const totalFrames = this._audioFramesForwarded + this._audioFramesDropped;
+		const connectionQuality = totalFrames > 0
+			? Math.round((this._audioFramesForwarded / totalFrames) * 100)
+			: 100;
+
 		return {
 			timestamp: Date.now(),
 			totalConnections: clients.size,
@@ -96,6 +130,12 @@ class StatsCollector {
 			audioFramesDroppedTotal: this._audioFramesDropped,
 			bandwidthBytesOutTotal: this._bandwidthBytesOut,
 			connectionsRejectedTotal: this._connectionsRejected,
+			sessionCount: this._sessionCount,
+			avgSessionDurationMs: this._sessionCount > 0
+				? Math.round(this._totalSessionDurationMs / this._sessionCount)
+				: 0,
+			avgLatencyMs,
+			connectionQuality,
 		};
 	}
 

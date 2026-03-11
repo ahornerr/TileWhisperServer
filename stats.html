@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TileWhisper — Server Stats</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
 @font-face {
@@ -16,192 +18,329 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --border: rgba(200, 169, 81, 0.2);
-  --gold: #c8a951;
-  --gold-dim: rgba(200, 169, 81, 0.7);
-  --text: #c9d1d9;
-  --text-dim: #8b949e;
-  --green: #3fb950;
-  --red: #f85149;
-  --font-display: 'RuneScape Bold', monospace;
+  --bg:          #09090f;
+  --bg2:         #0e0e17;
+  --surface:     #12121c;
+  --surface2:    #1a1a28;
+  --gold:        #c8a951;
+  --gold-bright: #ffbf69;
+  --gold-dim:    rgba(200,169,81,0.35);
+  --gold-glow:    rgba(232,201,106,0.3);
+  --purple-accent: #8b5cf6;
+  --text:        #e8dfc0;
+  --text-dim:    #a89e80;
+  --green:       #4caf76;
+  --red:         #e05252;
+  --font-rune:   'RuneScape Bold', 'Courier New', monospace;
+  --font-label:  'Cinzel', serif;
 }
+
+/* ── Base ── */
+html { scroll-behavior: smooth; }
 
 body {
   background: var(--bg);
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% 0%, rgba(200,169,81,0.04) 0%, transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
   color: var(--text);
-  font-family: system-ui, -apple-system, sans-serif;
-  font-size: 14px;
+  font-family: var(--font-label);
+  font-size: 16px;
   min-height: 100vh;
-  padding: 16px;
+  padding: 20px;
 }
 
+/* ── Header ── */
 header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
+  padding: 14px 24px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 16px;
+  border: 1px solid var(--gold-dim);
+  border-top: 2px solid var(--gold);
+  border-radius: 4px;
+  margin-bottom: 20px;
+  position: relative;
+  box-shadow: 0 4px 32px rgba(0,0,0,0.5), inset 0 1px 0 rgba(200,169,81,0.08);
 }
+
+header::before,
+header::after {
+  content: '◆';
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--gold);
+  font-size: 8px;
+  opacity: 0.6;
+}
+header::before { left: 10px; }
+header::after { right: 10px; }
 
 .logo {
-  font-family: var(--font-display);
-  font-size: 20px;
+  font-family: var(--font-rune);
+  font-size: 22px;
   color: var(--gold);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  background: linear-gradient(180deg, var(--gold-bright) 0%, var(--gold) 55%, #9d7d2c 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 8px rgba(200,169,81,0.25));
+  padding: 6px 14px;
+  border-radius: 2px;
 }
-
-.logo span { opacity: 0.6; margin-right: 8px; }
 
 #status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   font-size: 12px;
+  font-family: var(--font-label);
+  letter-spacing: 0.06em;
   color: var(--text-dim);
 }
 
 #status-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--red);
-  transition: background 0.3s;
+  box-shadow: 0 0 6px rgba(232,201,106,0.3);
+  transition: background 0.4s, box-shadow 0.4s;
+  flex-shrink: 0;
 }
 
-#status-dot.live { background: var(--green); }
+#status-dot.live {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(76,175,118,0.5);
+  animation: pulse-live 2.5s ease-out infinite;
+}
 
+@keyframes pulse-live {
+  0%   { box-shadow: 0 0 6px rgba(76,175,118,0.5); }
+  60%   { box-shadow: 0 0 8px rgba(76,175,118,0); }
+  100% { box-shadow: 0 0 6px rgba(76,175,118,0); }
+}
+
+#demo-indicator {
+  font-family: var(--font-label);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--bg);
+  background: var(--gold);
+  padding: 3px 10px;
+  border-radius: 2px;
+  display: none;
+}
+
+/* ── KPI Grid ── */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
+
+@media (max-width: 900px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 600px) { .kpi-grid { grid-template-columns: 1fr; } }
 
 .kpi-card {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px 20px;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  border: 1px solid var(--gold-dim);
+  border-top: 2px solid var(--gold);
+  border-radius: 4px;
+  padding: 18px 16px 14px;
+  position: relative;
+  transition: border-color 0.25s, box-shadow 0.25s, transform 0.2s;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.4);
+  overflow: hidden;
+}
+
+.kpi-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(200,169,81,0.06) 0%, transparent 60%);
+  pointer-events: none;
 }
 
 .kpi-card:hover {
-  border-color: rgba(200, 169, 81, 0.5);
-  box-shadow: 0 0 16px rgba(200, 169, 81, 0.08);
+  border-color: var(--gold-glow);
+  box-shadow: 0 2px 20px rgba(200,169,81,0.1), 0 4px 24px rgba(200,169,81,0.08), 0 2px 16px rgba(0,0,0,0.4);
+  transform: translateY(-1px);
+}
+
+.kpi-card.primary .kpi-value {
+  font-size: 48px;
 }
 
 .kpi-label {
+  font-family: var(--font-label);
   font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .kpi-value {
-  font-family: var(--font-display);
-  font-size: 32px;
+  font-family: var(--font-rune);
+  font-size: 44px;
   color: var(--gold);
   line-height: 1;
-  transition: transform 0.15s;
+  transition: transform 0.12s, color 0.12s, text-shadow 0 0 16px rgba(200,169,81,0.2);
+  text-shadow: 0 0 24px rgba(232,201,106,0.4);
 }
 
 .kpi-value.bump {
-  transform: scale(1.08);
-  color: #e8c971;
+  transform: scale(1.04);
+  color: var(--gold-bright);
+  text-shadow: 0 0 28px rgba(232,201,106,0.45);
 }
 
 .kpi-sub {
-  font-size: 11px;
+  font-family: var(--font-label);
+  font-size: 13px;
+  letter-spacing: 0.04em;
   color: var(--text-dim);
-  margin-top: 4px;
+  margin-top: 5px;
+}
+
+/* ── Charts Section ── */
+.charts-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--gold-dim) 50%, transparent);
+  margin: 0 24px 16px 0;
 }
 
 .charts-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
-.charts-grid.wide { grid-template-columns: 1fr; }
 
-@media (max-width: 900px) {
-  .charts-grid { grid-template-columns: 1fr; }
-}
+@media (max-width: 800px) { .charts-grid { grid-template-columns: 1fr; } }
 
 .chart-card {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px 20px;
+  border: 1px solid var(--gold-dim);
+  border-radius: 4px;
+  padding: 18px 20px 14px;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.4);
 }
 
 .chart-title {
+  font-family: var(--font-label);
   font-size: 12px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.14em;
   color: var(--text-dim);
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-title::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 1px;
+  background: var(--gold);
+  opacity: 0.5;
+  flex-shrink: 0;
 }
 
 .chart-wrap {
   position: relative;
-  height: 180px;
+  height: 200px;
 }
 
-footer {
-  text-align: center;
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 8px;
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .logo { font-size: 18px; }
+
+  .kpi-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-wrap {
+    height: 160px;
+  }
 }
 
-#demo-indicator {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  color: var(--bg);
-  background: var(--gold);
-  padding: 3px 8px;
-  border-radius: 4px;
+@media (max-width: 480px) {
+  header {
+    padding: 10px 16px;
+  }
+
+  .kpi-value {
+    font-size: 32px;
+  }
+
+  .chart-title {
+    font-size: 8px;
+  }
 }
 </style>
 </head>
 <body>
 
 <header>
-  <div class="logo"><span>⚔</span> TileWhisper</div>
+  <div class="logo"><span>⚔</span>TileWhisper</div>
   <div id="status">
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
   </div>
-  <div id="demo-indicator" style="display:none">DEMO MODE</div>
+  <div id="demo-indicator">DEMO MODE</div>
 </header>
 
 <div class="kpi-grid">
-  <div class="kpi-card">
+  <div class="kpi-card primary">
     <div class="kpi-label">Players</div>
     <div class="kpi-value" id="kpi-players">—</div>
     <div class="kpi-sub" id="kpi-auth">— authenticated</div>
   </div>
-  <div class="kpi-card">
+  <div class="kpi-card primary">
     <div class="kpi-label">Worlds</div>
     <div class="kpi-value" id="kpi-worlds">—</div>
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">Usernames</div>
-    <div class="kpi-value" id="kpi-usernames">—</div>
+    <div class="kpi-label">Frames / min</div>
+    <div class="kpi-value" id="kpi-framerate">—</div>
+    <div class="kpi-sub" id="kpi-framerate-trend"></div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Conn Quality</div>
+    <div class="kpi-value" id="kpi-quality">—</div>
+    <div class="kpi-sub" id="kpi-dropped-sub">total</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Avg Session</div>
+    <div class="kpi-value" id="kpi-session">—</div>
+    <div class="kpi-sub" id="kpi-session-count">0 sessions</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Avg Latency</div>
+    <div class="kpi-value" id="kpi-latency">—</div>
+    <div class="kpi-sub">rolling 60 pings</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Frames Dropped</div>
     <div class="kpi-value" id="kpi-dropped">—</div>
-    <div class="kpi-sub" id="kpi-dropped-sub">total</div>
+    <div class="kpi-sub">total</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Bandwidth Out</div>
@@ -215,6 +354,8 @@ footer {
   </div>
 </div>
 
+<div class="charts-divider"></div>
+
 <div class="charts-grid">
   <div class="chart-card">
     <div class="chart-title">Connected Players (24 h)</div>
@@ -226,38 +367,50 @@ footer {
   </div>
 </div>
 
-<div class="charts-grid wide">
+<div class="charts-grid">
   <div class="chart-card">
     <div class="chart-title">Top Worlds by Player Count</div>
-    <div class="chart-wrap" style="height:160px"><canvas id="chart-worlds"></canvas></div>
+    <div class="chart-wrap" style="height:200px"><canvas id="chart-worlds"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">Bandwidth Forwarded (24 h)</div>
+    <div class="chart-wrap"><canvas id="chart-bandwidth"></canvas></div>
   </div>
 </div>
-
-<footer>Fully aggregated &amp; anonymous · no usernames, IPs, or per-client data · updates every 5 s</footer>
 
 <script>
 // Check for ?demo flag in URL
 const DEMO_MODE = new URLSearchParams(location.search).has('demo');
 if (DEMO_MODE) document.getElementById('demo-indicator').style.display = 'block';
 
-const CHART_GOLD      = 'rgba(200,169,81,0.9)';
-const CHART_GOLD_FILL = 'rgba(200,169,81,0.12)';
-const GRID_COLOR      = 'rgba(255,255,255,0.06)';
+const CHART_GOLD      = 'rgba(200,169,81,0.95)';
+const CHART_GOLD_FILL = 'rgba(200,169,81,0.15)';
+const GRID_COLOR      = 'rgba(200,169,81,0.18)';
+const TICK_COLOR      = 'rgba(200,169,81,0.55)';
 
-Chart.defaults.color = '#8b949e';
-Chart.defaults.font.family = 'system-ui,-apple-system,sans-serif';
-Chart.defaults.font.size = 11;
+Chart.defaults.color = 'rgba(200,169,81,0.65)';
+Chart.defaults.font.family = "'Cinzel', serif";
+Chart.defaults.font.size = 12;
 
 function makeLineChart(id, label, color, fill) {
   return new Chart(document.getElementById(id), {
     type: 'line',
-    data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: fill, borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: true }] },
+    data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: fill, borderWidth: 1.5, pointRadius: 0, tension: 0.4, fill: true }] },
     options: {
       animation: false, responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: {
-        x: { grid: { color: GRID_COLOR }, ticks: { maxTicksLimit: 8, maxRotation: 0 } },
-        y: { grid: { color: GRID_COLOR }, min: 0, ticks: { precision: 0 } }
+        x: {
+          grid: { color: GRID_COLOR },
+          border: { color: 'rgba(200,169,81,0.15)' },
+          ticks: { maxTicksLimit: 6, maxRotation: 0, color: TICK_COLOR }
+        },
+        y: {
+          grid: { color: 'rgba(200,169,81,0.12)' },
+          border: { color: 'rgba(200,169,81,0.2)' },
+          min: 0,
+          ticks: { precision: 0, color: TICK_COLOR }
+        }
       }
     }
   });
@@ -266,15 +419,45 @@ function makeLineChart(id, label, color, fill) {
 const chartPlayers = makeLineChart('chart-players', 'Players', CHART_GOLD, CHART_GOLD_FILL);
 const chartAudio   = makeLineChart('chart-audio', 'Frames/min', CHART_GOLD, CHART_GOLD_FILL);
 
+const chartBandwidth = new Chart(document.getElementById('chart-bandwidth'), {
+  type: 'line',
+  data: { labels: [], datasets: [{ label: 'Bandwidth (MB)', data: [], borderColor: CHART_GOLD, backgroundColor: CHART_GOLD_FILL, borderWidth: 1.5, pointRadius: 0, tension: 0.4, fill: true }] },
+  options: {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        grid: { color: GRID_COLOR },
+        border: { color: 'rgba(200,169,81,0.2)' },
+        ticks: { maxTicksLimit: 6, maxRotation: 0, color: TICK_COLOR }
+      },
+      y: {
+        grid: { color: 'rgba(200,169,81,0.12)' },
+        border: { color: 'rgba(200,169,81,0.2)' },
+        min: 0,
+        ticks: { callback: v => fmtBytes(v * 1048576), color: TICK_COLOR }
+      }
+    }
+  }
+});
+
 const chartWorlds = new Chart(document.getElementById('chart-worlds'), {
   type: 'bar',
-  data: { labels: [], datasets: [{ label: 'Players', data: [], backgroundColor: CHART_GOLD_FILL, borderColor: CHART_GOLD, borderWidth: 1 }] },
+  data: { labels: [], datasets: [{ label: 'Players', data: [], backgroundColor: CHART_GOLD_FILL, borderColor: CHART_GOLD, borderWidth: 1, borderRadius: 3 }] },
   options: {
     animation: false, indexAxis: 'y', responsive: true, maintainAspectRatio: false,
     plugins: { legend: { display: false } },
     scales: {
-      x: { grid: { color: GRID_COLOR }, ticks: { precision: 0 } },
-      y: { grid: { color: GRID_COLOR } }
+      x: {
+        grid: { color: 'rgba(200,169,81,0.12)' },
+        border: { color: 'rgba(200,169,81,0.2)' },
+        ticks: { precision: 0, color: TICK_COLOR }
+      },
+      y: {
+        grid: { color: 'rgba(200,169,81,0.12)' },
+        border: { color: 'rgba(200,169,81,0.2)' },
+        ticks: { color: TICK_COLOR }
+      }
     }
   }
 });
@@ -291,38 +474,85 @@ function fmtBytes(b) {
   return b+' B';
 }
 
-function bump(id) {
+function fmtDuration(ms) {
+  if (!ms || ms < 1000) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + (s % 60) + 's';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+function trendArrow(history, field, windowSize = 10) {
+  if (!history || history.length < windowSize * 2) return '';
+  const recent = history.slice(-windowSize).reduce((a, p) => a + (p[field] || 0), 0);
+  const prev   = history.slice(-windowSize * 2, -windowSize).reduce((a, p) => a + (p[field] || 0), 0);
+  if (prev === 0) return '';
+  const pct = ((recent - prev) / prev) * 100;
+  if (Math.abs(pct) < 5) return '';
+  return pct > 0 ? ` ↑ ${pct.toFixed(0)}%` : ` ↓ ${Math.abs(pct).toFixed(0)}%`;
+}
+
+function set(id, v) {
   const el = document.getElementById(id);
+  if (!el) return;
+  const str = v != null ? String(v) : '—';
+  if (el.textContent === str) return;
+  el.textContent = str;
   el.classList.remove('bump');
   void el.offsetWidth;
   el.classList.add('bump');
-  setTimeout(() => el.classList.remove('bump'), 200);
+  setTimeout(() => el.classList.remove('bump'), 300);
 }
 
-function set(id, val) {
-  const el = document.getElementById(id);
-  if (el.textContent !== String(val)) { el.textContent = val; bump(id); }
-}
+let historyData = [];
 
 function loadHistory(data) {
   if (!Array.isArray(data) || data.length === 0) return;
-  chartPlayers.data.labels = data.map(p => fmtTime(p.timestamp));
-  chartPlayers.data.datasets[0].data = data.map(p => p.totalConnections);
+  historyData = [...data];
+  chartPlayers.data.labels = historyData.map(p => fmtTime(p.timestamp));
+  chartPlayers.data.datasets[0].data = historyData.map(p => p.totalConnections);
   chartPlayers.update('none');
-  chartAudio.data.labels = data.map(p => fmtTime(p.timestamp));
-  chartAudio.data.datasets[0].data = data.map(p => p.audioFramesForwarded);
+  chartAudio.data.labels = historyData.map(p => fmtTime(p.timestamp));
+  chartAudio.data.datasets[0].data = historyData.map(p => p.audioFramesForwarded);
   chartAudio.update('none');
+  chartBandwidth.data.labels = historyData.map(p => fmtTime(p.timestamp));
+  chartBandwidth.data.datasets[0].data = historyData.map(p => (p.bandwidthBytesOutTotal || p.estimatedBandwidthBytesOut || 0) / 1048576);
+  chartBandwidth.update('none');
 }
 
 function updateKPIs(s) {
   set('kpi-players', s.totalConnections);
   document.getElementById('kpi-auth').textContent = s.authenticatedConnections + ' authenticated';
   set('kpi-worlds', s.activeWorlds);
-  set('kpi-usernames', s.uniqueUsernames);
+
+  // Frame rate: use last history point's per-minute delta if available
+  const lastPt = historyData[historyData.length - 1];
+  const framesPerMin = lastPt?.audioFramesForwarded != null ? lastPt.audioFramesForwarded : 0;
+  set('kpi-framerate', framesPerMin);
+
+  // Frames/min trend (compare last 5 history points vs 5 before that)
+  const trend = trendArrow(historyData, 'audioFramesForwarded', 5);
+  document.getElementById('kpi-framerate-trend').textContent = trend;
+
+  // Connection quality (% of frames delivered)
+  const totalFrames = s.audioFramesForwardedTotal + s.audioFramesDroppedTotal;
+  const quality = totalFrames > 0 ? Math.round((s.audioFramesForwardedTotal / totalFrames) * 100) : 100;
+  set('kpi-quality', quality + '%');
+  document.getElementById('kpi-dropped-sub').textContent = (s.audioFramesDroppedTotal || 0).toLocaleString() + ' dropped total';
+
   set('kpi-dropped', s.audioFramesDroppedTotal);
   set('kpi-bw', fmtBytes(s.bandwidthBytesOutTotal));
   set('kpi-rejected', s.connectionsRejectedTotal);
 
+  // Session duration
+  set('kpi-session', s.avgSessionDurationMs ? fmtDuration(s.avgSessionDurationMs) : '—');
+  document.getElementById('kpi-session-count').textContent = (s.sessionCount || 0) + ' sessions';
+
+  // Latency
+  set('kpi-latency', s.avgLatencyMs ? Math.round(s.avgLatencyMs) + ' ms' : '—');
+
+  // Worlds chart
   const entries = Object.entries(s.worldPlayerCounts || {})
     .sort((a, b) => b[1] - a[1]).slice(0, 10);
   chartWorlds.data.labels = entries.map(e => 'W' + e[0]);
@@ -330,44 +560,52 @@ function updateKPIs(s) {
   chartWorlds.update('none');
 }
 
+// appendLivePoint is only used in demo mode to grow charts over time.
+// In live mode, charts are refreshed periodically via /api/history.
 function appendLivePoint(s) {
+  historyData.push(s);
+  if (historyData.length > 1440) historyData.shift();
+
   const t = fmtTime(s.timestamp);
-  for (const [chart, val] of [[chartPlayers, s.totalConnections], [chartAudio, s.audioFramesForwardedTotal]]) {
-    chart.data.labels.push(t);
-    chart.data.datasets[0].data.push(val);
-    if (chart.data.labels.length > 1440) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
-    chart.update('none');
-  }
+
+  chartPlayers.data.labels.push(t);
+  chartPlayers.data.datasets[0].data.push(s.totalConnections);
+  if (chartPlayers.data.labels.length > 1440) { chartPlayers.data.labels.shift(); chartPlayers.data.datasets[0].data.shift(); }
+  chartPlayers.update('none');
+
+  // Demo history points include per-tick delta fields (audioFramesForwarded, estimatedBandwidthBytesOut)
+  chartAudio.data.labels.push(t);
+  chartAudio.data.datasets[0].data.push(s.audioFramesForwarded || 0);
+  if (chartAudio.data.labels.length > 1440) { chartAudio.data.labels.shift(); chartAudio.data.datasets[0].data.shift(); }
+  chartAudio.update('none');
+
+  chartBandwidth.data.labels.push(t);
+  chartBandwidth.data.datasets[0].data.push((s.estimatedBandwidthBytesOut || 0) / 1048576);
+  if (chartBandwidth.data.labels.length > 1440) { chartBandwidth.data.labels.shift(); chartBandwidth.data.datasets[0].data.shift(); }
+  chartBandwidth.update('none');
 }
 
-// ── Demo mode ──────────────────────────────────────────────────────────────
+// ── Demo mode ──────────────────────────────────────────────────────
 
-// Seeded-random walk so the 24h history looks continuous, not jumpy
 function generateHistory() {
   const history = [];
   const now = Date.now();
-  // Fixed world pool for demo — realistic OSRS world numbers
-  const WORLDS = [301, 302, 303, 308, 316, 325, 330, 358, 384, 394, 406, 416, 430, 450, 470];
 
-  let players = 28; // start value for smooth walk
+  let players = 28;
   let totalAudio = 0, totalDropped = 0, totalBw = 0, totalRejected = 0;
 
   for (let i = 1439; i >= 0; i--) {
     const ts = now - i * 60000;
     const hour = new Date(ts).getHours();
-
-    // Time-of-day multiplier: peaks evenings (18–22), dips at night (0–7)
     const tod = 0.4 + 0.6 * Math.max(0, Math.sin((hour - 4) * Math.PI / 18));
-
-    // Smooth random walk clamped to a realistic range
     const target = Math.round(10 + 60 * tod);
     players = Math.round(players + (target - players) * 0.08 + (Math.random() - 0.5) * 4);
     players = Math.max(0, Math.min(120, players));
 
     const worlds = Math.max(1, Math.round(players / 8 + Math.random() * 2));
-    const audio  = Math.round(players * (8 + Math.random() * 6));
+    const audio   = Math.round(players * (8 + Math.random() * 6));
     const dropped = Math.round(audio * 0.015 * Math.random() * 2);
-    const bw = audio * 120;
+    const bw      = audio * 120;
     const rejected = Math.random() < 0.1 ? 1 : 0;
 
     totalAudio    += audio;
@@ -405,7 +643,7 @@ function generateLiveTick() {
   demoPlayers = Math.max(0, Math.min(120, demoPlayers));
 
   const worlds = Math.max(1, Math.round(demoPlayers / 8 + Math.random() * 2));
-  const audio  = Math.round(demoPlayers * (8 + Math.random() * 6));
+  const audio   = Math.round(demoPlayers * (8 + Math.random() * 6));
   const dropped = Math.round(audio * 0.015 * Math.random() * 2);
   const rejected = Math.random() < 0.1 ? 1 : 0;
 
@@ -414,7 +652,6 @@ function generateLiveTick() {
   demoCumBw       += audio * 120;
   demoCumRejected += rejected;
 
-  // Distribute players across active worlds
   const worldPlayerCounts = {};
   let remaining = demoPlayers;
   for (let w = 0; w < worlds; w++) {
@@ -430,14 +667,23 @@ function generateLiveTick() {
     activeWorlds: worlds,
     uniqueUsernames: Math.round(demoPlayers * 0.72),
     worldPlayerCounts,
+    // Per-tick deltas (used by appendLivePoint for demo charts)
+    audioFramesForwarded: audio,
+    audioFramesDropped: dropped,
+    estimatedBandwidthBytesOut: audio * 120,
+    connectionsRejected: rejected,
+    // Running totals (used by updateKPIs)
     audioFramesForwardedTotal: demoCumAudio,
     audioFramesDroppedTotal:   demoCumDropped,
     bandwidthBytesOutTotal:    demoCumBw,
-    connectionsRejectedTotal:  demoCumRejected,
+    connectionsRejectedTotal: demoCumRejected,
+    avgSessionDurationMs: 4 * 60 * 1000 + Math.round(Math.random() * 2 * 60 * 1000), // ~4-6 min
+    avgLatencyMs: 20 + Math.round(Math.random() * 30),
+    sessionCount: demoTick * 3,
   };
 }
 
-// ── Live WebSocket (non-demo) ──────────────────────────────────────────────
+// ── Live WebSocket (non-demo) ──────────────────────────────────────
 
 let ws, retryDelay = 1000;
 
@@ -455,16 +701,14 @@ function connect() {
     try {
       const s = JSON.parse(e.data);
       updateKPIs(s);
-      appendLivePoint(s);
-      const now = new Date();
       document.getElementById('status-text').textContent =
-        'Live · ' + now.toTimeString().slice(0, 8);
+        'Live · ' + new Date().toTimeString().slice(0, 8);
     } catch (_) {}
   };
 
   ws.onclose = () => {
     document.getElementById('status-dot').classList.remove('live');
-    document.getElementById('status-text').textContent = 'Reconnecting in ' + (retryDelay/1000|0) + ' s…';
+    document.getElementById('status-text').textContent = 'Reconnecting in ' + (retryDelay/1000) + ' s…';
     setTimeout(connect, retryDelay);
     retryDelay = Math.min(retryDelay * 2, 30000);
   };
@@ -477,7 +721,6 @@ function connect() {
 if (DEMO_MODE) {
   loadHistory(generateHistory());
 
-  // Fire one tick immediately so KPIs + world chart are populated on load
   const initial = generateLiveTick();
   updateKPIs(initial);
 
@@ -492,7 +735,11 @@ if (DEMO_MODE) {
       'Demo · ' + new Date().toTimeString().slice(0, 8);
   }, 5000);
 } else {
-  fetch('/api/history').then(r => r.json()).then(loadHistory).catch(() => {});
+  function refreshHistory() {
+    fetch('/api/history').then(r => r.json()).then(loadHistory).catch(() => {});
+  }
+  refreshHistory();
+  setInterval(refreshHistory, 300000); // refresh line charts every 5 min
   connect();
 }
 </script>

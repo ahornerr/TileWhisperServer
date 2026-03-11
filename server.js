@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const url = require('url');
 const { StatsCollector } = require('./stats');
 
 // ========================================================================
@@ -90,7 +91,10 @@ function createServer({
 	// Per-username connection tracking
 	const usernameToClientIds = new Map();
 
-	const wss = new WebSocket.Server({ port });
+	// Use noServer when statsPort === port so both share one HTTP server
+	const wss = (statsPort && statsPort === port)
+		? new WebSocket.Server({ noServer: true })
+		: new WebSocket.Server({ port });
 
 	// Atomic counter for client IDs (more reliable than Sec-WebSocket-Key)
 	let clientIdCounter = 0;
@@ -171,8 +175,10 @@ function createServer({
 			ip: clientIp,
 			world: 0, x: 0, y: 0, plane: 0,
 			username: '',
+			openTime: now,
 			lastSeen: now,
 			isAlive: true,
+			pingTime: null,
 			audioFrameCount: 0,
 			audioWindowStart: now,
 			audioFrameCount30s: 0,
@@ -188,7 +194,13 @@ function createServer({
 
 		ws.on('pong', () => {
 			const client = clients.get(clientId);
-			if (client) client.isAlive = true;
+			if (client) {
+				client.isAlive = true;
+				if (client.pingTime !== null) {
+					collector.onPingLatency(Date.now() - client.pingTime);
+					client.pingTime = null;
+				}
+			}
 		});
 
 		ws.on('message', (data, isBinary) => {
@@ -363,8 +375,9 @@ function createServer({
 		});
 
 		ws.on('close', (code) => {
-			collector.onConnectionClosed();
 			const client = clients.get(clientId);
+			const durationMs = client ? Date.now() - client.openTime : 0;
+			collector.onConnectionClosed(durationMs);
 			const clientWorld = client?.world || 0;
 			const clientUsername = client?.username || '';
 			console.log(`Client disconnected: ${clientId} ip=${client?.ip} (${code})`);
@@ -413,6 +426,9 @@ function createServer({
 			if (!client.isAlive) {
 				console.log(`Client ${id} terminated (no pong)`);
 
+				// Record session duration
+				collector.onConnectionClosed(Date.now() - client.openTime);
+
 				// Remove from world index
 				const worldSet = worldClients.get(client.world);
 				if (worldSet) {
@@ -440,6 +456,7 @@ function createServer({
 			}
 			client.isAlive = false;
 			if (client.ws.readyState === WebSocket.OPEN) {
+				client.pingTime = Date.now();
 				client.ws.ping();
 			}
 		}
@@ -473,44 +490,37 @@ function createServer({
 		let statsHtml = null;
 		try { statsHtml = fs.readFileSync(htmlPath); } catch (_) {}
 
-		statsHttpServer = http.createServer((req, res) => {
+		const statsHttpHandler = (req, res) => {
 			if (req.method !== 'GET') {
 				res.writeHead(405).end();
 				return;
 			}
 
-			if (req.url === '/' || req.url === '/index.html') {
+			const parsedUrl = url.parse(req.url);
+			const pathname = parsedUrl.pathname;
+
+			if (pathname === '/' || pathname === '/index.html') {
 				if (!statsHtml) { res.writeHead(404).end('Not found'); return; }
 				res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(statsHtml);
-			} else if (req.url === '/runescape_bold.woff2') {
+			} else if (pathname === '/runescape_bold.woff2') {
 				try {
 					const font = fs.readFileSync(fontPath);
 					res.writeHead(200, { 'Content-Type': 'font/woff2', 'Cache-Control': 'max-age=86400' }).end(font);
 				} catch (_) {
 					res.writeHead(404).end('Not found');
 				}
-			} else if (req.url === '/api/stats') {
+			} else if (pathname === '/api/stats') {
 				const data = JSON.stringify(collector.getLiveStats(clients, worldClients, usernameToClientIds));
 				res.writeHead(200, { 'Content-Type': 'application/json' }).end(data);
-			} else if (req.url === '/api/history') {
+			} else if (pathname === '/api/history') {
 				const data = JSON.stringify(collector.getHistory());
 				res.writeHead(200, { 'Content-Type': 'application/json' }).end(data);
 			} else {
 				res.writeHead(404).end('Not found');
 			}
-		});
+		};
 
 		statsWss = new WebSocket.Server({ noServer: true });
-
-		statsHttpServer.on('upgrade', (req, socket, head) => {
-			if (req.url === '/stats') {
-				statsWss.handleUpgrade(req, socket, head, (ws) => {
-					statsWss.emit('connection', ws);
-				});
-			} else {
-				socket.destroy();
-			}
-		});
 
 		statsWss.on('connection', (ws) => {
 			// Send immediate snapshot on connect
@@ -527,9 +537,36 @@ function createServer({
 			}
 		}, 5000);
 
-		statsHttpServer.listen(statsPort, () => {
-			console.log(`TileWhisper stats dashboard listening on port ${statsPort}`);
-		});
+		if (statsPort === port) {
+			// Single-port mode: game WS and stats dashboard share one port.
+			// Plugin clients connect to ws://host:port (path /)
+			// Stats dashboard connects to ws://host:port/stats
+			statsHttpServer = http.createServer(statsHttpHandler);
+			statsHttpServer.on('upgrade', (req, socket, head) => {
+				const pathname = url.parse(req.url).pathname;
+				if (pathname === '/stats') {
+					statsWss.handleUpgrade(req, socket, head, (ws) => statsWss.emit('connection', ws));
+				} else {
+					wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+				}
+			});
+			statsHttpServer.listen(port, () => {
+				console.log(`TileWhisper relay + stats dashboard listening on port ${port}`);
+			});
+		} else {
+			// Dual-port mode: game WS on port, stats dashboard on statsPort
+			statsHttpServer = http.createServer(statsHttpHandler);
+			statsHttpServer.on('upgrade', (req, socket, head) => {
+				if (url.parse(req.url).pathname === '/stats') {
+					statsWss.handleUpgrade(req, socket, head, (ws) => statsWss.emit('connection', ws));
+				} else {
+					socket.destroy();
+				}
+			});
+			statsHttpServer.listen(statsPort, () => {
+				console.log(`TileWhisper stats dashboard listening on port ${statsPort}`);
+			});
+		}
 	}
 
 	wss.on('close', () => {
@@ -551,7 +588,9 @@ if (require.main === module) {
 	const PORT = parseInt(process.env.PORT || '8080', 10);
 	const STATS_PORT = process.env.STATS_PORT ? parseInt(process.env.STATS_PORT, 10) : null;
 	createServer({ port: PORT, statsPort: STATS_PORT });
-	console.log(`TileWhisper relay server listening on port ${PORT}`);
+	if (!STATS_PORT || STATS_PORT !== PORT) {
+		console.log(`TileWhisper relay server listening on port ${PORT}`);
+	}
 
 	process.on('SIGINT', () => {
 		console.log('Shutting down...');
