@@ -1,4 +1,9 @@
 const WebSocket = require('ws');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const url = require('url');
+const { StatsCollector } = require('./stats');
 
 // ========================================================================
 // Pure helper functions (exported for unit testing)
@@ -58,6 +63,8 @@ function parseAudioPacket(buffer) {
 
 function createServer({
 	port = 8080,
+	statsPort = null,
+	statsHistoryMinutes = 1440,
 	maxConnectionsPerIp = 3,
 	maxTotalConnections = 500,
 	maxConnectionsPerUsername = 2,
@@ -70,6 +77,7 @@ function createServer({
 	maxAudioFramesPer30Sec = 1200,  // ~40/sec sustained average
 	maxPresencePer30Sec = 30,
 } = {}) {
+	const collector = new StatsCollector({ historyMinutes: statsHistoryMinutes });
 	// Client state: { ws, ip, world, x, y, plane, username, lastSeen, isAlive,
 	//                  audioFrameCount, audioWindowStart,
 	//                  audioFrameCount30s, audioWindow30Start,
@@ -83,7 +91,10 @@ function createServer({
 	// Per-username connection tracking
 	const usernameToClientIds = new Map();
 
-	const wss = new WebSocket.Server({ port });
+	// Use noServer when statsPort === port so both share one HTTP server
+	const wss = (statsPort && statsPort === port)
+		? new WebSocket.Server({ noServer: true })
+		: new WebSocket.Server({ port });
 
 	// Atomic counter for client IDs (more reliable than Sec-WebSocket-Key)
 	let clientIdCounter = 0;
@@ -139,6 +150,7 @@ function createServer({
 		// Enforce global connection cap
 		if (clients.size >= maxTotalConnections) {
 			console.warn(`Connection rejected from ${clientIp}: server full (${clients.size}/${maxTotalConnections})`);
+			collector.onConnectionRejected('server_full');
 			ws.close(1008, 'Server full, try again later');
 			return;
 		}
@@ -149,6 +161,7 @@ function createServer({
 
 		if (ipConnections >= maxConnectionsPerIp) {
 			console.warn(`Connection rejected from ${clientIp}: too many connections (${ipConnections}/${maxConnectionsPerIp})`);
+			collector.onConnectionRejected('ip_limit');
 			ws.close(1008, 'Too many connections from your IP');
 			return;
 		}
@@ -162,8 +175,10 @@ function createServer({
 			ip: clientIp,
 			world: 0, x: 0, y: 0, plane: 0,
 			username: '',
+			openTime: now,
 			lastSeen: now,
 			isAlive: true,
+			pingTime: null,
 			audioFrameCount: 0,
 			audioWindowStart: now,
 			audioFrameCount30s: 0,
@@ -174,11 +189,18 @@ function createServer({
 			presenceWindow30Start: now,
 		});
 
+		collector.onConnectionAccepted();
 		sendWelcome(ws);
 
 		ws.on('pong', () => {
 			const client = clients.get(clientId);
-			if (client) client.isAlive = true;
+			if (client) {
+				client.isAlive = true;
+				if (client.pingTime !== null) {
+					collector.onPingLatency(Date.now() - client.pingTime);
+					client.pingTime = null;
+				}
+			}
 		});
 
 		ws.on('message', (data, isBinary) => {
@@ -202,6 +224,7 @@ function createServer({
 				}
 				client.audioFrameCount++;
 				if (client.audioFrameCount > maxAudioFramesPerSec) {
+					collector.onAudioFrameDropped();
 					return; // Drop silently
 				}
 
@@ -213,6 +236,7 @@ function createServer({
 				client.audioFrameCount30s++;
 				if (client.audioFrameCount30s > maxAudioFramesPer30Sec) {
 					console.warn(`Burst audio detected from ${clientId}, dropping`);
+					collector.onAudioFrameDropped();
 					return;
 				}
 
@@ -229,6 +253,7 @@ function createServer({
 							return;
 						}
 						forwardAudioToNearby(clientId, data, packet.x, packet.y, packet.plane);
+						collector.onAudioFrameForwarded(data.byteLength);
 					} else {
 						console.warn(`Malformed audio packet from ${clientId} (${data.byteLength} bytes)`);
 					}
@@ -261,6 +286,7 @@ function createServer({
 						if (!existingUsernameIds.has(clientId)) {
 							if (existingUsernameIds.size >= maxConnectionsPerUsername) {
 								console.warn(`Too many connections for username ${username} (${existingUsernameIds.size}/${maxConnectionsPerUsername}), rejecting presence from ${clientId}`);
+								collector.onConnectionRejected('username_limit');
 								return;
 							}
 							existingUsernameIds.add(clientId);
@@ -332,6 +358,8 @@ function createServer({
 							worldClients.get(client.world).add(clientId);
 						}
 
+						collector.onPresenceProcessed();
+
 						// Broadcast to all same-world clients
 						const worldSet = worldClients.get(client.world);
 						if (worldSet) {
@@ -348,6 +376,8 @@ function createServer({
 
 		ws.on('close', (code) => {
 			const client = clients.get(clientId);
+			const durationMs = client ? Date.now() - client.openTime : 0;
+			collector.onConnectionClosed(durationMs);
 			const clientWorld = client?.world || 0;
 			const clientUsername = client?.username || '';
 			console.log(`Client disconnected: ${clientId} ip=${client?.ip} (${code})`);
@@ -396,6 +426,9 @@ function createServer({
 			if (!client.isAlive) {
 				console.log(`Client ${id} terminated (no pong)`);
 
+				// Record session duration
+				collector.onConnectionClosed(Date.now() - client.openTime);
+
 				// Remove from world index
 				const worldSet = worldClients.get(client.world);
 				if (worldSet) {
@@ -423,6 +456,7 @@ function createServer({
 			}
 			client.isAlive = false;
 			if (client.ws.readyState === WebSocket.OPEN) {
+				client.pingTime = Date.now();
 				client.ws.ping();
 			}
 		}
@@ -438,7 +472,110 @@ function createServer({
 		}
 	}, 30000);
 
-	wss.on('close', () => clearInterval(heartbeat));
+	// Snapshot interval: push stats point every 60s
+	const snapshotInterval = setInterval(() => {
+		collector.snapshot(clients, worldClients, usernameToClientIds);
+	}, 60000);
+
+	// Optional stats HTTP + WebSocket server
+	let statsHttpServer = null;
+	let statsWss = null;
+	let statsTickInterval = null;
+
+	if (statsPort) {
+		const statsDir = __dirname;
+		const htmlPath = path.join(statsDir, 'stats.html');
+		const fontPath = path.join(statsDir, 'runescape_bold.woff2');
+
+		let statsHtml = null;
+		try { statsHtml = fs.readFileSync(htmlPath); } catch (_) {}
+
+		const statsHttpHandler = (req, res) => {
+			if (req.method !== 'GET') {
+				res.writeHead(405).end();
+				return;
+			}
+
+			const parsedUrl = url.parse(req.url);
+			const pathname = parsedUrl.pathname;
+
+			if (pathname === '/' || pathname === '/index.html') {
+				if (!statsHtml) { res.writeHead(404).end('Not found'); return; }
+				res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(statsHtml);
+			} else if (pathname === '/runescape_bold.woff2') {
+				try {
+					const font = fs.readFileSync(fontPath);
+					res.writeHead(200, { 'Content-Type': 'font/woff2', 'Cache-Control': 'max-age=86400' }).end(font);
+				} catch (_) {
+					res.writeHead(404).end('Not found');
+				}
+			} else if (pathname === '/api/stats') {
+				const data = JSON.stringify(collector.getLiveStats(clients, worldClients, usernameToClientIds));
+				res.writeHead(200, { 'Content-Type': 'application/json' }).end(data);
+			} else if (pathname === '/api/history') {
+				const data = JSON.stringify(collector.getHistory());
+				res.writeHead(200, { 'Content-Type': 'application/json' }).end(data);
+			} else {
+				res.writeHead(404).end('Not found');
+			}
+		};
+
+		statsWss = new WebSocket.Server({ noServer: true });
+
+		statsWss.on('connection', (ws) => {
+			// Send immediate snapshot on connect
+			const payload = JSON.stringify(collector.getLiveStats(clients, worldClients, usernameToClientIds));
+			if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+		});
+
+		// Broadcast live stats to all connected stats clients every 5s
+		statsTickInterval = setInterval(() => {
+			if (statsWss.clients.size === 0) return;
+			const payload = JSON.stringify(collector.getLiveStats(clients, worldClients, usernameToClientIds));
+			for (const ws of statsWss.clients) {
+				if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+			}
+		}, 5000);
+
+		if (statsPort === port) {
+			// Single-port mode: game WS and stats dashboard share one port.
+			// Plugin clients connect to ws://host:port (path /)
+			// Stats dashboard connects to ws://host:port/stats
+			statsHttpServer = http.createServer(statsHttpHandler);
+			statsHttpServer.on('upgrade', (req, socket, head) => {
+				const pathname = url.parse(req.url).pathname;
+				if (pathname === '/stats') {
+					statsWss.handleUpgrade(req, socket, head, (ws) => statsWss.emit('connection', ws));
+				} else {
+					wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+				}
+			});
+			statsHttpServer.listen(port, () => {
+				console.log(`TileWhisper relay + stats dashboard listening on port ${port}`);
+			});
+		} else {
+			// Dual-port mode: game WS on port, stats dashboard on statsPort
+			statsHttpServer = http.createServer(statsHttpHandler);
+			statsHttpServer.on('upgrade', (req, socket, head) => {
+				if (url.parse(req.url).pathname === '/stats') {
+					statsWss.handleUpgrade(req, socket, head, (ws) => statsWss.emit('connection', ws));
+				} else {
+					socket.destroy();
+				}
+			});
+			statsHttpServer.listen(statsPort, () => {
+				console.log(`TileWhisper stats dashboard listening on port ${statsPort}`);
+			});
+		}
+	}
+
+	wss.on('close', () => {
+		clearInterval(heartbeat);
+		clearInterval(snapshotInterval);
+		if (statsTickInterval) clearInterval(statsTickInterval);
+		if (statsWss) statsWss.close();
+		if (statsHttpServer) statsHttpServer.close();
+	});
 
 	return wss;
 }
@@ -449,8 +586,11 @@ function createServer({
 
 if (require.main === module) {
 	const PORT = parseInt(process.env.PORT || '8080', 10);
-	createServer({ port: PORT });
-	console.log(`TileWhisper relay server listening on port ${PORT}`);
+	const STATS_PORT = process.env.STATS_PORT ? parseInt(process.env.STATS_PORT, 10) : null;
+	createServer({ port: PORT, statsPort: STATS_PORT });
+	if (!STATS_PORT || STATS_PORT !== PORT) {
+		console.log(`TileWhisper relay server listening on port ${PORT}`);
+	}
 
 	process.on('SIGINT', () => {
 		console.log('Shutting down...');
