@@ -13,12 +13,11 @@ function distance3D(x1, y1, z1, x2, y2, z2) {
 	return chebyshevDistance(x1, y1, x2, y2);
 }
 
-// Validate OSRS username format (1-12 chars, alphanumeric/space/hyphen, starts with alphanumeric)
+// Validate OSRS username format (1-12 chars, must start with letter, then letters/numbers/spaces/hyphens)
 function isValidUsername(username) {
 	if (typeof username !== 'string') return false;
 	if (username.length < 1 || username.length > 12) return false;
-	// Start with letter or number, then can include letters, numbers, spaces, hyphens
-	return /^[A-Za-z0-9][A-Za-z0-9 _-]{0,11}$/.test(username) && !/  /.test(username);
+	return /^[A-Za-z][A-Za-z0-9 _-]{0,11}$/.test(username) && !/  /.test(username);
 }
 
 // Validate OSRS coordinate range (0-16383)
