@@ -1,0 +1,117 @@
+'use strict';
+
+class StatsCollector {
+	constructor({ historyMinutes = 1440 } = {}) {
+		this.capacity = historyMinutes;
+		this.buffer = new Array(this.capacity);
+		this.writeIdx = 0;
+		this.count = 0;
+
+		// Running totals (never reset)
+		this._audioFramesForwarded = 0;
+		this._audioFramesDropped = 0;
+		this._bandwidthBytesOut = 0;
+		this._connectionsRejected = 0;
+
+		// Last snapshot values (for delta calculation)
+		this._lastAudioFramesForwarded = 0;
+		this._lastAudioFramesDropped = 0;
+		this._lastBandwidthBytesOut = 0;
+		this._lastConnectionsRejected = 0;
+	}
+
+	onConnectionAccepted() {}
+
+	onConnectionRejected(reason) {
+		this._connectionsRejected++;
+	}
+
+	onConnectionClosed() {}
+
+	onAudioFrameForwarded(bytes) {
+		this._audioFramesForwarded++;
+		this._bandwidthBytesOut += bytes;
+	}
+
+	onAudioFrameDropped() {
+		this._audioFramesDropped++;
+	}
+
+	onPresenceProcessed() {}
+
+	// Called every 60s by server.js
+	snapshot(clients, worldClients, usernameToClientIds) {
+		const audioFramesDelta = this._audioFramesForwarded - this._lastAudioFramesForwarded;
+		const audioDroppedDelta = this._audioFramesDropped - this._lastAudioFramesDropped;
+		const bandwidthDelta = this._bandwidthBytesOut - this._lastBandwidthBytesOut;
+		const rejectedDelta = this._connectionsRejected - this._lastConnectionsRejected;
+
+		this._lastAudioFramesForwarded = this._audioFramesForwarded;
+		this._lastAudioFramesDropped = this._audioFramesDropped;
+		this._lastBandwidthBytesOut = this._bandwidthBytesOut;
+		this._lastConnectionsRejected = this._connectionsRejected;
+
+		let authenticatedConnections = 0;
+		for (const client of clients.values()) {
+			if (client.username) authenticatedConnections++;
+		}
+
+		const point = {
+			timestamp: Date.now(),
+			totalConnections: clients.size,
+			authenticatedConnections,
+			activeWorlds: worldClients.size,
+			uniqueUsernames: usernameToClientIds.size,
+			audioFramesForwarded: audioFramesDelta,
+			audioFramesDropped: audioDroppedDelta,
+			estimatedBandwidthBytesOut: bandwidthDelta,
+			connectionsRejected: rejectedDelta,
+		};
+
+		this.buffer[this.writeIdx % this.capacity] = point;
+		this.writeIdx++;
+		if (this.count < this.capacity) this.count++;
+
+		return point;
+	}
+
+	// Instant totals from live Maps — called by stats HTTP endpoint
+	getLiveStats(clients, worldClients, usernameToClientIds) {
+		let authenticatedConnections = 0;
+		const worldPlayerCounts = {};
+		for (const client of clients.values()) {
+			if (client.username) authenticatedConnections++;
+		}
+		for (const [world, set] of worldClients.entries()) {
+			worldPlayerCounts[world] = set.size;
+		}
+		return {
+			timestamp: Date.now(),
+			totalConnections: clients.size,
+			authenticatedConnections,
+			activeWorlds: worldClients.size,
+			uniqueUsernames: usernameToClientIds.size,
+			worldPlayerCounts,
+			audioFramesForwardedTotal: this._audioFramesForwarded,
+			audioFramesDroppedTotal: this._audioFramesDropped,
+			bandwidthBytesOutTotal: this._bandwidthBytesOut,
+			connectionsRejectedTotal: this._connectionsRejected,
+		};
+	}
+
+	// Ring buffer as array, oldest-first
+	getHistory() {
+		if (this.count === 0) return [];
+
+		const result = [];
+		const startIdx = this.count < this.capacity ? 0 : this.writeIdx % this.capacity;
+
+		for (let i = 0; i < this.count; i++) {
+			result.push(this.buffer[(startIdx + i) % this.capacity]);
+		}
+
+		return result;
+	}
+}
+
+module.exports = { StatsCollector };
