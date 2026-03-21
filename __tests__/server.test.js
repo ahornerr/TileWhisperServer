@@ -62,13 +62,15 @@ function sendPresence(ws, opts = {}) {
 function buildAudioBuffer(opts = {}) {
 	const { world = 301, x = 3200, y = 3200, plane = 0, username = 'Player', audioLen = 10 } = opts;
 	const usernameBytes = Buffer.from(username, 'utf8');
-	const buf = Buffer.alloc(14 + usernameBytes.length + audioLen);
+	// Layout: [world:4][x:4][y:4][plane:1][usernameLen:1][username:N][timestampSec:4][audio:M]
+	const buf = Buffer.alloc(14 + usernameBytes.length + 4 + audioLen);
 	buf.writeUInt32LE(world >>> 0, 0);
 	buf.writeUInt32LE(x >>> 0, 4);
 	buf.writeUInt32LE(y >>> 0, 8);
 	buf.writeUInt8(plane, 12);
 	buf.writeUInt8(usernameBytes.length, 13);
 	usernameBytes.copy(buf, 14);
+	buf.writeUInt32LE(Math.floor(Date.now() / 1000), 14 + usernameBytes.length);
 	return buf;
 }
 
@@ -79,7 +81,7 @@ function buildAudioBuffer(opts = {}) {
 describe('parseAudioPacket', () => {
 	it('parses a valid packet', () => {
 		const buf = buildAudioBuffer({ world: 301, x: 3200, y: 3200, plane: 0, username: 'Alice', audioLen: 10 });
-		expect(parseAudioPacket(buf)).toEqual({ world: 301, x: 3200, y: 3200, plane: 0, username: 'Alice' });
+		expect(parseAudioPacket(buf)).toEqual({ world: 301, x: 3200, y: 3200, plane: 0, username: 'Alice', timestampSec: expect.any(Number) });
 	});
 
 	it('parses a single-char username', () => {
@@ -104,7 +106,7 @@ describe('parseAudioPacket', () => {
 
 	it('handles zero values', () => {
 		const buf = buildAudioBuffer({ world: 0, x: 0, y: 0, plane: 0, username: 'Bob' });
-		expect(parseAudioPacket(buf)).toEqual({ world: 0, x: 0, y: 0, plane: 0, username: 'Bob' });
+		expect(parseAudioPacket(buf)).toEqual({ world: 0, x: 0, y: 0, plane: 0, username: 'Bob', timestampSec: expect.any(Number) });
 	});
 
 	it('handles max int32 world value', () => {
@@ -406,9 +408,9 @@ describe('Server: rate limiting', () => {
 		await nextMessage(b);
 		await nextMessage(a); // a gets nearby update when b joins
 
-		// Build a valid audio packet at exactly the limit: 14 header + username + audio
+		// Build a valid audio packet at exactly the limit: 14 header + username + 4 timestamp + audio
 		const username = 'Alice';
-		const audioLen = 300 - 14 - username.length; // exactly 300 total
+		const audioLen = 300 - 14 - username.length - 4; // exactly 300 total
 		const audio = buildAudioBuffer({ world: 601, x: 3200, y: 3200, username, audioLen });
 		expect(audio.length).toBe(300);
 

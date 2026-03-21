@@ -139,6 +139,21 @@ class StatsCollector {
 		};
 	}
 
+	// Reset running totals once a day. History ringbuffer is not affected.
+	resetDailyCounters() {
+		this._audioFramesForwarded = 0;
+		this._audioFramesDropped = 0;
+		this._bandwidthBytesOut = 0;
+		this._connectionsRejected = 0;
+		this._totalSessionDurationMs = 0;
+		this._sessionCount = 0;
+		// Reset last-snapshot baselines so deltas stay accurate after the reset
+		this._lastAudioFramesForwarded = 0;
+		this._lastAudioFramesDropped = 0;
+		this._lastBandwidthBytesOut = 0;
+		this._lastConnectionsRejected = 0;
+	}
+
 	// Ring buffer as array, oldest-first
 	getHistory() {
 		if (this.count === 0) return [];
