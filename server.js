@@ -93,6 +93,7 @@ function createServer({
 	// Burst detection: 30-second window limits
 	maxAudioFramesPer30Sec = 1200,  // ~40/sec sustained average
 	maxPresencePer30Sec = 30,
+	trustProxy = false,
 } = {}) {
 	const collector = new StatsCollector({ historyMinutes: statsHistoryMinutes });
 	// Client state: { ws, ip, world, x, y, plane, username, lastSeen, isAlive,
@@ -162,7 +163,9 @@ function createServer({
 	}
 
 	wss.on('connection', (ws, req) => {
-		const clientIp = req.socket.remoteAddress;
+		const clientIp = trustProxy && req.headers['x-forwarded-for']
+			? req.headers['x-forwarded-for'].split(',')[0].trim()
+			: req.socket.remoteAddress;
 
 		// Enforce global connection cap
 		if (clients.size >= maxTotalConnections) {
@@ -620,7 +623,8 @@ function createServer({
 if (require.main === module) {
 	const PORT = parseInt(process.env.PORT || '8080', 10);
 	const STATS_PORT = process.env.STATS_PORT ? parseInt(process.env.STATS_PORT, 10) : null;
-	createServer({ port: PORT, statsPort: STATS_PORT });
+	const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
+	createServer({ port: PORT, statsPort: STATS_PORT, trustProxy: TRUST_PROXY });
 	if (!STATS_PORT || STATS_PORT !== PORT) {
 		console.log(`TileWhisper relay server listening on port ${PORT}`);
 	}
