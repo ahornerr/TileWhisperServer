@@ -13,9 +13,9 @@ function startServer(opts = {}) {
 	return { wss, port };
 }
 
-function connect(port) {
+function connect(port, headers = {}) {
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(`ws://localhost:${port}`);
+		const ws = new WebSocket(`ws://localhost:${port}`, { headers });
 		ws._msgQueue = [];
 		ws._msgWaiters = [];
 		ws.on('message', (data) => {
@@ -27,6 +27,24 @@ function connect(port) {
 		});
 		ws.on('open', () => resolve(ws));
 		ws.on('error', err => reject(err));
+	});
+}
+
+function connectOrReject(port, headers = {}) {
+	return new Promise((resolve) => {
+		const ws = new WebSocket(`ws://localhost:${port}`, { headers });
+		ws._msgQueue = [];
+		ws._msgWaiters = [];
+		ws.on('message', (data) => {
+			if (ws._msgWaiters.length > 0) {
+				ws._msgWaiters.shift()(data);
+			} else {
+				ws._msgQueue.push(data);
+			}
+		});
+		ws.on('open', () => resolve({ ws, rejected: false }));
+		ws.on('close', () => resolve({ ws, rejected: true }));
+		ws.on('error', () => resolve({ ws, rejected: true }));
 	});
 }
 
@@ -719,6 +737,72 @@ describe('Server: rate limiting', () => {
 		expect(jsonReceived).toBeGreaterThan(0);
 
 		await closeAllAndWait([a, b]);
+		wss.close();
+	});
+});
+
+describe('Server: proxy IP detection (trustProxy)', () => {
+	it('connects successfully with X-Forwarded-For header when trustProxy=true', async () => {
+		const { wss, port } = startServer({ trustProxy: true });
+		const ws = await connect(port, { 'x-forwarded-for': '1.2.3.4' });
+		const msg = JSON.parse(await nextMessage(ws));
+		expect(msg.type).toBe('welcome');
+		await closeAllAndWait([ws]);
+		wss.close();
+	});
+
+	it('falls back to remoteAddress when no X-Forwarded-For header even with trustProxy=true', async () => {
+		const { wss, port } = startServer({ trustProxy: true });
+		const ws = await connect(port);
+		const msg = JSON.parse(await nextMessage(ws));
+		expect(msg.type).toBe('welcome');
+		await closeAllAndWait([ws]);
+		wss.close();
+	});
+
+	it('uses first IP when X-Forwarded-For contains multiple comma-separated IPs', async () => {
+		// Two clients with same first IP but different proxy hops — should hit the per-IP limit
+		const { wss, port } = startServer({ trustProxy: true, maxConnectionsPerIp: 1 });
+
+		const wsA = await connect(port, { 'x-forwarded-for': '1.2.3.4, 99.88.77.66' });
+		await nextMessage(wsA); // welcome
+
+		// Same first IP — should be rejected (limit 1)
+		const wsB = new WebSocket(`ws://localhost:${port}`, { headers: { 'x-forwarded-for': '1.2.3.4, 55.44.33.22' } });
+		const closeCodeB = await new Promise(r => wsB.once('close', r));
+		expect(closeCodeB).toBe(1008);
+
+		await closeAllAndWait([wsA, wsB]);
+		wss.close();
+	});
+
+	it('treats different X-Forwarded-For IPs as separate clients under trustProxy=true', async () => {
+		const { wss, port } = startServer({ trustProxy: true, maxConnectionsPerIp: 1 });
+
+		const wsA = await connect(port, { 'x-forwarded-for': '1.2.3.4' });
+		await nextMessage(wsA); // welcome
+
+		// Different IP — should be accepted
+		const wsB = await connect(port, { 'x-forwarded-for': '5.6.7.8' });
+		await nextMessage(wsB); // welcome — different IP, should be allowed
+
+		await closeAllAndWait([wsA, wsB]);
+		wss.close();
+	});
+
+	it('ignores X-Forwarded-For and uses remoteAddress (localhost) when trustProxy=false', async () => {
+		// With trustProxy=false all connections are localhost — limit=1 means 2nd conn rejected
+		const { wss, port } = startServer({ trustProxy: false, maxConnectionsPerIp: 1 });
+
+		const wsA = await connect(port, { 'x-forwarded-for': '1.2.3.4' });
+		await nextMessage(wsA); // welcome
+
+		// Different X-Forwarded-For but trustProxy=false — both treated as localhost, second rejected
+		const wsB = new WebSocket(`ws://localhost:${port}`, { headers: { 'x-forwarded-for': '5.6.7.8' } });
+		const closeCodeB = await new Promise(r => wsB.once('close', r));
+		expect(closeCodeB).toBe(1008);
+
+		await closeAllAndWait([wsA, wsB]);
 		wss.close();
 	});
 });
