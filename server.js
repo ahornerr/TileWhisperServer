@@ -511,7 +511,7 @@ function createServer({
 				}
 			} else if (pathname === '/api/stats') {
 				const data = JSON.stringify(collector.getLiveStats(clients, worldClients, usernameToClientIds));
-				res.writeHead(200, { 'Content-Type': 'application/json' }).end(data);
+				res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }).end(data);
 			} else if (pathname === '/api/history') {
 				const data = JSON.stringify(collector.getHistory());
 				res.writeHead(200, { 'Content-Type': 'application/json' }).end(data);
