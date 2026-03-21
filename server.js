@@ -3,7 +3,13 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const crypto = require('crypto');
 const { StatsCollector } = require('./stats');
+
+// One-way hash of client IPs for logs — keeps debugging useful without storing raw IPs
+function hashIp(ip) {
+	return crypto.createHash('sha256').update(ip + 'tilewhisper').digest('hex').substring(0, 12);
+}
 
 // ========================================================================
 // Pure helper functions (exported for unit testing)
@@ -22,6 +28,9 @@ function distance3D(x1, y1, z1, x2, y2, z2) {
 function isValidUsername(username) {
 	if (typeof username !== 'string') return false;
 	if (username.length < 1 || username.length > 12) return false;
+	// Reject multi-byte Unicode chars (Cyrillic, Greek, etc.) — OSRS usernames are ASCII only.
+	// Buffer.byteLength > string.length means multi-byte characters are present.
+	if (Buffer.byteLength(username, 'utf8') !== username.length) return false;
 	return /^[A-Za-z][A-Za-z0-9 _-]{0,11}$/.test(username) && !/  /.test(username);
 }
 
@@ -41,7 +50,8 @@ function isValidWorld(world) {
 }
 
 // Parse binary audio packet header (same format as VoicePacket.java)
-// Layout: [world:4 LE][x:4 LE][y:4 LE][plane:1][usernameLen:1][username:N][audio:M]
+// Layout: [world:4 LE][x:4 LE][y:4 LE][plane:1][usernameLen:1][username:N][timestampSec:4 LE][audio:M]
+// timestampSec is the Unix epoch in seconds; optional for backwards compat (absent on legacy clients).
 function parseAudioPacket(buffer) {
 	if (buffer.length < 14) return null;
 
@@ -54,7 +64,14 @@ function parseAudioPacket(buffer) {
 	if (buffer.length < 14 + usernameLen) return null;
 
 	const username = buffer.toString('utf8', 14, 14 + usernameLen);
-	return { world, x, y, plane, username };
+
+	// Read optional 4-byte timestamp (present when client sends updated packet format)
+	let timestampSec = null;
+	if (buffer.length >= 14 + usernameLen + 4) {
+		timestampSec = buffer.readUInt32LE(14 + usernameLen);
+	}
+
+	return { world, x, y, plane, username, timestampSec };
 }
 
 // ========================================================================
@@ -149,7 +166,7 @@ function createServer({
 
 		// Enforce global connection cap
 		if (clients.size >= maxTotalConnections) {
-			console.warn(`Connection rejected from ${clientIp}: server full (${clients.size}/${maxTotalConnections})`);
+			console.warn(`Connection rejected from ${hashIp(clientIp)}: server full (${clients.size}/${maxTotalConnections})`);
 			collector.onConnectionRejected('server_full');
 			ws.close(1008, 'Server full, try again later');
 			return;
@@ -160,14 +177,14 @@ function createServer({
 			.filter(c => c.ip === clientIp).length;
 
 		if (ipConnections >= maxConnectionsPerIp) {
-			console.warn(`Connection rejected from ${clientIp}: too many connections (${ipConnections}/${maxConnectionsPerIp})`);
+			console.warn(`Connection rejected from ${hashIp(clientIp)}: too many connections (${ipConnections}/${maxConnectionsPerIp})`);
 			collector.onConnectionRejected('ip_limit');
 			ws.close(1008, 'Too many connections from your IP');
 			return;
 		}
 
 		const clientId = String(++clientIdCounter);
-		console.log(`Client connected: ${clientId} (${clientIp})`);
+		console.log(`Client connected: ${clientId} (${hashIp(clientIp)})`);
 
 		const now = Date.now();
 		clients.set(clientId, {
@@ -251,6 +268,16 @@ function createServer({
 						    !isValidUsername(packet.username)) {
 							console.warn(`Invalid audio packet from ${clientId}: world=${packet.world}, x=${packet.x}, y=${packet.y}, plane=${packet.plane}, username=${packet.username}`);
 							return;
+						}
+						// Replay defense: reject packets with a timestamp more than 10 seconds
+						// stale or 2 seconds in the future (allows for clock skew).
+						if (packet.timestampSec !== null) {
+							const nowSec = Math.floor(Date.now() / 1000);
+							const drift = nowSec - packet.timestampSec;
+							if (drift > 10 || drift < -2) {
+								console.warn(`Stale/future audio packet from ${clientId}: drift=${drift}s`);
+								return;
+							}
 						}
 						forwardAudioToNearby(clientId, data, packet.x, packet.y, packet.plane);
 						collector.onAudioFrameForwarded(data.byteLength);
@@ -477,6 +504,11 @@ function createServer({
 		collector.snapshot(clients, worldClients, usernameToClientIds);
 	}, 60000);
 
+	// Reset running stat counters once a day to prevent unbounded accumulation
+	const dailyReset = setInterval(() => {
+		collector.resetDailyCounters();
+	}, 24 * 60 * 60 * 1000);
+
 	// Optional stats HTTP + WebSocket server
 	let statsHttpServer = null;
 	let statsWss = null;
@@ -572,6 +604,7 @@ function createServer({
 	wss.on('close', () => {
 		clearInterval(heartbeat);
 		clearInterval(snapshotInterval);
+		clearInterval(dailyReset);
 		if (statsTickInterval) clearInterval(statsTickInterval);
 		if (statsWss) statsWss.close();
 		if (statsHttpServer) statsHttpServer.close();
